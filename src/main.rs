@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+use cathedrals::chunking;
 use cathedrals::config::{self, Parser};
 use cathedrals::ingest::{self, OllamaClient};
 use cathedrals::markdown;
@@ -106,9 +107,10 @@ fn ingest_file(
 		Some(&file_path_str),
 	)?;
 
+	let mut total_chunks = 0usize;
 	for (position, entry) in segmented.iter().enumerate() {
 		let hash = minhash::minhash(&entry.body);
-		storage::insert_entry(
+		let entry_id = storage::insert_entry(
 			connection,
 			document_id,
 			entry,
@@ -118,11 +120,16 @@ fn ingest_file(
 			&file_path_str,
 			&hash,
 		)?;
+
+		let chunks = chunking::chunk_text(&entry.body);
+		storage::insert_chunks(connection, entry_id, &chunks)?;
+		total_chunks += chunks.len();
 	}
 
 	eprintln!(
-		"  {} entries from \"{}\"",
+		"  {} entries, {} chunks from \"{}\"",
 		segmented.len(),
+		total_chunks,
 		source_title,
 	);
 	Ok(())
@@ -238,29 +245,34 @@ fn main() -> Result<()> {
 			if results.is_empty() {
 				println!("no results");
 			} else {
-				for result in &results {
-					println!(
-						"--- [{}] {} | {} ---",
-						result.source_title,
-						result.author.as_deref().unwrap_or("unknown"),
-						result.clip_date,
-					);
-					let preview: String = result
-						.body
-						.chars()
-						.take(200)
-						.collect();
-					println!("{}", preview);
-					println!();
+				for doc in &results {
+					println!("=== [{}] {} ===", doc.source_title, doc.clip_date);
+					for chunk in &doc.chunks {
+						if let Some(heading) = &chunk.heading_title {
+							print!("  ## {} ", heading);
+						} else {
+							print!("  ");
+						}
+						if let Some(author) = &chunk.author {
+							print!("[{}] ", author);
+						}
+						println!();
+						for line in chunk.chunk_body.lines() {
+							println!("    {}", line);
+						}
+						println!();
+					}
 				}
 			}
 		}
 		Some("stats") => {
 			let documents = storage::document_count(&connection)?;
 			let entries = storage::entry_count(&connection)?;
+			let chunks = storage::chunk_count(&connection)?;
 			println!("database: {}", db_path.display());
 			println!("documents: {}", documents);
 			println!("entries: {}", entries);
+			println!("chunks: {}", chunks);
 		}
 		Some("dump") => {
 			let query = positional[1..].join(" ");

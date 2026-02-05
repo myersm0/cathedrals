@@ -29,6 +29,17 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			minhash BLOB NOT NULL
 		);
 
+		CREATE TABLE IF NOT EXISTS chunks (
+			id INTEGER PRIMARY KEY,
+			entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+			chunk_index INTEGER NOT NULL,
+			start_char INTEGER NOT NULL,
+			end_char INTEGER NOT NULL,
+			body TEXT NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS chunks_entry_id ON chunks(entry_id);
+
 		CREATE TABLE IF NOT EXISTS media (
 			id INTEGER PRIMARY KEY,
 			file_path TEXT NOT NULL,
@@ -44,29 +55,27 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			PRIMARY KEY (media_id, entry_id)
 		);
 
-		CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+		CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 			body,
-			author,
-			source_title,
-			content=entries,
+			content=chunks,
 			content_rowid=id
 		);
 
-		CREATE TRIGGER IF NOT EXISTS entries_fts_insert AFTER INSERT ON entries BEGIN
-			INSERT INTO entries_fts(rowid, body, author, source_title)
-			VALUES (new.id, new.body, new.author, new.source_title);
+		CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+			INSERT INTO chunks_fts(rowid, body)
+			VALUES (new.id, new.body);
 		END;
 
-		CREATE TRIGGER IF NOT EXISTS entries_fts_delete AFTER DELETE ON entries BEGIN
-			INSERT INTO entries_fts(entries_fts, rowid, body, author, source_title)
-			VALUES ('delete', old.id, old.body, old.author, old.source_title);
+		CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+			INSERT INTO chunks_fts(chunks_fts, rowid, body)
+			VALUES ('delete', old.id, old.body);
 		END;
 
-		CREATE TRIGGER IF NOT EXISTS entries_fts_update AFTER UPDATE ON entries BEGIN
-			INSERT INTO entries_fts(entries_fts, rowid, body, author, source_title)
-			VALUES ('delete', old.id, old.body, old.author, old.source_title);
-			INSERT INTO entries_fts(rowid, body, author, source_title)
-			VALUES (new.id, new.body, new.author, new.source_title);
+		CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
+			INSERT INTO chunks_fts(chunks_fts, rowid, body)
+			VALUES ('delete', old.id, old.body);
+			INSERT INTO chunks_fts(rowid, body)
+			VALUES (new.id, new.body);
 		END;
 		",
 	)?;
@@ -137,40 +146,115 @@ pub fn insert_entry(
 	Ok(EntryId(connection.last_insert_rowid()))
 }
 
-pub struct SearchResult {
+pub fn insert_chunks(
+	connection: &Connection,
+	entry_id: EntryId,
+	chunks: &[crate::chunking::Chunk],
+) -> Result<()> {
+	for chunk in chunks {
+		connection.execute(
+			"INSERT INTO chunks (entry_id, chunk_index, start_char, end_char, body)
+			 VALUES (?1, ?2, ?3, ?4, ?5)",
+			params![
+				entry_id.0,
+				chunk.chunk_index,
+				chunk.start_char,
+				chunk.end_char,
+				chunk.body,
+			],
+		)?;
+	}
+	Ok(())
+}
+
+pub struct ChunkSearchResult {
+	pub chunk_id: i64,
 	pub entry_id: i64,
 	pub document_id: i64,
-	pub body: String,
+	pub chunk_body: String,
+	pub chunk_index: u32,
+	pub entry_position: u32,
 	pub author: Option<String>,
 	pub source_title: String,
 	pub clip_date: String,
+	pub heading_title: Option<String>,
 	pub rank: f64,
 }
 
-pub fn search(connection: &Connection, query: &str) -> Result<Vec<SearchResult>> {
+pub struct GroupedSearchResult {
+	pub document_id: i64,
+	pub source_title: String,
+	pub clip_date: String,
+	pub chunks: Vec<ChunkHit>,
+}
+
+pub struct ChunkHit {
+	pub entry_id: i64,
+	pub entry_position: u32,
+	pub chunk_index: u32,
+	pub chunk_body: String,
+	pub author: Option<String>,
+	pub heading_title: Option<String>,
+	pub rank: f64,
+}
+
+pub fn search(connection: &Connection, query: &str) -> Result<Vec<GroupedSearchResult>> {
 	let mut statement = connection.prepare(
-		"SELECT e.id, e.document_id, e.body, e.author, e.source_title, e.clip_date,
-		        rank
-		 FROM entries_fts f
-		 JOIN entries e ON e.id = f.rowid
-		 WHERE entries_fts MATCH ?1
-		 ORDER BY rank
-		 LIMIT 20",
+		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
+		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank
+		 FROM chunks_fts f
+		 JOIN chunks c ON c.id = f.rowid
+		 JOIN entries e ON e.id = c.entry_id
+		 WHERE chunks_fts MATCH ?1
+		 ORDER BY f.rank
+		 LIMIT 50",
 	)?;
-	let results = statement
+	let rows: Vec<ChunkSearchResult> = statement
 		.query_map(params![query], |row| {
-			Ok(SearchResult {
-				entry_id: row.get(0)?,
-				document_id: row.get(1)?,
-				body: row.get(2)?,
-				author: row.get(3)?,
-				source_title: row.get(4)?,
-				clip_date: row.get(5)?,
-				rank: row.get(6)?,
+			Ok(ChunkSearchResult {
+				chunk_id: row.get(0)?,
+				entry_id: row.get(1)?,
+				document_id: row.get(2)?,
+				chunk_body: row.get(3)?,
+				chunk_index: row.get(4)?,
+				entry_position: row.get(5)?,
+				author: row.get(6)?,
+				source_title: row.get(7)?,
+				clip_date: row.get(8)?,
+				heading_title: row.get(9)?,
+				rank: row.get(10)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
-	Ok(results)
+
+	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
+	for row in rows {
+		let doc = grouped.iter_mut().find(|d| d.document_id == row.document_id);
+		let hit = ChunkHit {
+			entry_id: row.entry_id,
+			entry_position: row.entry_position,
+			chunk_index: row.chunk_index,
+			chunk_body: row.chunk_body,
+			author: row.author,
+			heading_title: row.heading_title,
+			rank: row.rank,
+		};
+		match doc {
+			Some(doc) => doc.chunks.push(hit),
+			None => grouped.push(GroupedSearchResult {
+				document_id: row.document_id,
+				source_title: row.source_title,
+				clip_date: row.clip_date,
+				chunks: vec![hit],
+			}),
+		}
+	}
+
+	for doc in &mut grouped {
+		doc.chunks.sort_by_key(|c| (c.entry_position, c.chunk_index));
+	}
+
+	Ok(grouped)
 }
 
 pub fn document_count(connection: &Connection) -> Result<i64> {
@@ -179,6 +263,10 @@ pub fn document_count(connection: &Connection) -> Result<i64> {
 
 pub fn entry_count(connection: &Connection) -> Result<i64> {
 	Ok(connection.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?)
+}
+
+pub fn chunk_count(connection: &Connection) -> Result<i64> {
+	Ok(connection.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?)
 }
 
 pub struct DumpEntry {

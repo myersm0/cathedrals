@@ -1,6 +1,5 @@
 use anyhow::Result;
 use chrono::NaiveDateTime;
-use std::path::Path;
 
 use crate::types::{MediaId, MediaItem, MediaType};
 

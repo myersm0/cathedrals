@@ -1,3 +1,4 @@
+pub mod chunking;
 pub mod config;
 pub mod types;
 pub mod minhash;
