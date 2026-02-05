@@ -1,5 +1,7 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
+
+use crate::types::*;
 
 pub fn initialize(connection: &Connection) -> Result<()> {
 	connection.execute_batch(
@@ -71,4 +73,122 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		",
 	)?;
 	Ok(())
+}
+
+fn merge_strategy_to_str(strategy: MergeStrategy) -> &'static str {
+	match strategy {
+		MergeStrategy::None => "none",
+		MergeStrategy::Positional => "positional",
+		MergeStrategy::Timestamped => "timestamped",
+	}
+}
+
+fn collection_to_str(collection: Collection) -> &'static str {
+	match collection {
+		Collection::Personal => "personal",
+		Collection::Work => "work",
+	}
+}
+
+pub fn insert_document(
+	connection: &Connection,
+	collection: Collection,
+	source_title: &str,
+	merge_strategy: MergeStrategy,
+	origin_path: Option<&str>,
+) -> Result<DocumentId> {
+	connection.execute(
+		"INSERT INTO documents (collection, source_title, merge_strategy, origin_path)
+		 VALUES (?1, ?2, ?3, ?4)",
+		params![
+			collection_to_str(collection),
+			source_title,
+			merge_strategy_to_str(merge_strategy),
+			origin_path,
+		],
+	)?;
+	Ok(DocumentId(connection.last_insert_rowid()))
+}
+
+pub fn insert_entry(
+	connection: &Connection,
+	document_id: DocumentId,
+	entry: &SegmentedEntry,
+	position: u32,
+	source_title: &str,
+	clip_date: &str,
+	file_path: &str,
+	minhash: &MinHashSignature,
+) -> Result<EntryId> {
+	let minhash_bytes: Vec<u8> = minhash
+		.iter()
+		.flat_map(|v| v.to_le_bytes())
+		.collect();
+	connection.execute(
+		"INSERT INTO entries (
+			document_id, body, author, timestamp, source_title,
+			clip_date, file_path, position, heading_level, heading_title,
+			is_quote, is_contaminated, minhash
+		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+		params![
+			document_id.0,
+			entry.body,
+			entry.author,
+			entry.timestamp,
+			source_title,
+			clip_date,
+			file_path,
+			position,
+			entry.heading_level.map(|l| l as i32),
+			entry.heading_title,
+			entry.is_quote as i32,
+			entry.is_contaminated as i32,
+			minhash_bytes,
+		],
+	)?;
+	Ok(EntryId(connection.last_insert_rowid()))
+}
+
+pub struct SearchResult {
+	pub entry_id: i64,
+	pub document_id: i64,
+	pub body: String,
+	pub author: Option<String>,
+	pub source_title: String,
+	pub clip_date: String,
+	pub rank: f64,
+}
+
+pub fn search(connection: &Connection, query: &str) -> Result<Vec<SearchResult>> {
+	let mut statement = connection.prepare(
+		"SELECT e.id, e.document_id, e.body, e.author, e.source_title, e.clip_date,
+		        rank
+		 FROM entries_fts f
+		 JOIN entries e ON e.id = f.rowid
+		 WHERE entries_fts MATCH ?1
+		 ORDER BY rank
+		 LIMIT 20",
+	)?;
+	let results = statement
+		.query_map(params![query], |row| {
+			Ok(SearchResult {
+				entry_id: row.get(0)?,
+				document_id: row.get(1)?,
+				body: row.get(2)?,
+				author: row.get(3)?,
+				source_title: row.get(4)?,
+				clip_date: row.get(5)?,
+				rank: row.get(6)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(results)
+}
+
+pub fn document_count(connection: &Connection) -> Result<i64> {
+	Ok(connection.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?)
+}
+
+pub fn entry_count(connection: &Connection) -> Result<i64> {
+	Ok(connection.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?)
 }

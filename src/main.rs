@@ -1,8 +1,253 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+use cathedrals::ingest::{self, OllamaClient};
+use cathedrals::markdown;
+use cathedrals::minhash;
+use cathedrals::storage;
+use cathedrals::types::*;
+
+fn default_db_path() -> PathBuf {
+	dirs::data_dir()
+		.unwrap_or_else(|| PathBuf::from("."))
+		.join("cathedrals")
+		.join("cathedrals.db")
+}
+
+fn open_db(path: &Path) -> Result<rusqlite::Connection> {
+	if let Some(parent) = path.parent() {
+		std::fs::create_dir_all(parent)?;
+	}
+	let connection = rusqlite::Connection::open(path)?;
+	storage::initialize(&connection)?;
+	Ok(connection)
+}
+
+fn ingest_file(
+	connection: &rusqlite::Connection,
+	ollama: &OllamaClient,
+	file_path: &Path,
+	collection: Collection,
+) -> Result<()> {
+	let text = std::fs::read_to_string(file_path)
+		.with_context(|| format!("reading {}", file_path.display()))?;
+
+	let lines: Vec<&str> = text.lines().collect();
+	if lines.is_empty() {
+		return Ok(());
+	}
+
+	let source_title = ingest::parse_source_header(lines[0])
+		.unwrap_or_else(|| file_path.display().to_string());
+
+	let body = if ingest::parse_source_header(lines[0]).is_some() {
+		lines[1..].join("\n")
+	} else {
+		text.clone()
+	};
+
+	let clip_date = file_path
+		.file_name()
+		.and_then(|name| name.to_str())
+		.and_then(ingest::parse_clip_date)
+		.unwrap_or_else(|| chrono::Local::now().naive_local());
+	let clip_date_str = clip_date.format("%Y-%m-%d %H:%M:%S").to_string();
+
+	let is_markdown = file_path
+		.extension()
+		.map(|ext| ext == "md")
+		.unwrap_or(false);
+
+	let segmented = if is_markdown {
+		markdown::parse_markdown_sections(&body)
+	} else {
+		let result = ollama.segment(&source_title, &body)?;
+		result.entries
+	};
+
+	if segmented.is_empty() {
+		eprintln!("  no entries found, skipping");
+		return Ok(());
+	}
+
+	let merge_strategy = if is_markdown {
+		MergeStrategy::None
+	} else {
+		ingest::infer_merge_strategy(&source_title)
+	};
+
+	let file_path_str = file_path.to_string_lossy();
+
+	let document_id = storage::insert_document(
+		connection,
+		collection,
+		&source_title,
+		merge_strategy,
+		Some(&file_path_str),
+	)?;
+
+	for (position, entry) in segmented.iter().enumerate() {
+		let hash = minhash::minhash(&entry.body);
+		storage::insert_entry(
+			connection,
+			document_id,
+			entry,
+			position as u32,
+			&source_title,
+			&clip_date_str,
+			&file_path_str,
+			&hash,
+		)?;
+	}
+
+	eprintln!(
+		"  {} entries from \"{}\"",
+		segmented.len(),
+		source_title,
+	);
+	Ok(())
+}
+
+fn ingest_directory(
+	connection: &rusqlite::Connection,
+	ollama: &OllamaClient,
+	directory: &Path,
+	collection: Collection,
+) -> Result<u32> {
+	let mut count = 0u32;
+	let mut paths: Vec<PathBuf> = std::fs::read_dir(directory)?
+		.filter_map(|entry| entry.ok())
+		.map(|entry| entry.path())
+		.filter(|path| {
+			path.extension()
+				.map(|ext| ext == "txt" || ext == "md")
+				.unwrap_or(false)
+		})
+		.collect();
+	paths.sort();
+
+	eprintln!("found {} files in {}", paths.len(), directory.display());
+
+	for path in &paths {
+		eprint!("ingesting {} ... ", path.display());
+		match ingest_file(connection, ollama, path, collection) {
+			Ok(()) => count += 1,
+			Err(error) => eprintln!("  error: {:#}", error),
+		}
+	}
+	Ok(count)
+}
+
+fn print_usage() {
+	eprintln!(
+		"usage:
+  cathedrals ingest <directory> [--collection personal|work] [--model <name>]
+  cathedrals search <query>
+  cathedrals stats
+
+options:
+  --db <path>          database path (default: $XDG_DATA_HOME/cathedrals/cathedrals.db)
+  --ollama <url>       ollama endpoint (default: http://localhost:11434)
+  --model <name>       ollama model (default: mistral-nemo)
+  --collection <name>  personal or work (default: personal)"
+	);
+}
 
 fn main() -> Result<()> {
-	let connection = rusqlite::Connection::open("cathedrals.db")?;
-	cathedrals::storage::initialize(&connection)?;
-	println!("initialized database");
+	let args: Vec<String> = std::env::args().collect();
+	if args.len() < 2 {
+		print_usage();
+		std::process::exit(1);
+	}
+
+	let mut db_path: Option<PathBuf> = None;
+	let mut ollama_url = "http://localhost:11434".to_string();
+	let mut model_name = "mistral-nemo".to_string();
+	let mut collection = Collection::Personal;
+
+	let mut positional = Vec::new();
+	let mut index = 1;
+	while index < args.len() {
+		match args[index].as_str() {
+			"--db" => {
+				index += 1;
+				db_path = Some(PathBuf::from(&args[index]));
+			}
+			"--ollama" => {
+				index += 1;
+				ollama_url = args[index].clone();
+			}
+			"--model" => {
+				index += 1;
+				model_name = args[index].clone();
+			}
+			"--collection" => {
+				index += 1;
+				collection = match args[index].as_str() {
+					"work" => Collection::Work,
+					_ => Collection::Personal,
+				};
+			}
+			other => positional.push(other.to_string()),
+		}
+		index += 1;
+	}
+
+	let db_path = db_path.unwrap_or_else(default_db_path);
+	let connection = open_db(&db_path)?;
+
+	match positional.first().map(|s| s.as_str()) {
+		Some("ingest") => {
+			let directory = positional
+				.get(1)
+				.context("ingest requires a directory argument")?;
+			let ollama = OllamaClient::new(&ollama_url, &model_name);
+			let count = ingest_directory(
+				&connection,
+				&ollama,
+				Path::new(directory),
+				collection,
+			)?;
+			eprintln!("ingested {} files", count);
+		}
+		Some("search") => {
+			let query = positional[1..].join(" ");
+			if query.is_empty() {
+				anyhow::bail!("search requires a query");
+			}
+			let results = storage::search(&connection, &query)?;
+			if results.is_empty() {
+				println!("no results");
+			} else {
+				for result in &results {
+					println!(
+						"--- [{}] {} | {} ---",
+						result.source_title,
+						result.author.as_deref().unwrap_or("unknown"),
+						result.clip_date,
+					);
+					let preview: String = result
+						.body
+						.chars()
+						.take(200)
+						.collect();
+					println!("{}", preview);
+					println!();
+				}
+			}
+		}
+		Some("stats") => {
+			let documents = storage::document_count(&connection)?;
+			let entries = storage::entry_count(&connection)?;
+			println!("database: {}", db_path.display());
+			println!("documents: {}", documents);
+			println!("entries: {}", entries);
+		}
+		_ => {
+			print_usage();
+			std::process::exit(1);
+		}
+	}
+
 	Ok(())
 }
