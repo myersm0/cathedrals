@@ -1,5 +1,5 @@
-const target_words: usize = 100;
-const min_split_threshold: usize = 135;
+const target_words: usize = 300;
+const min_split_threshold: usize = 400;
 const stride_fraction: f64 = 1.0 / 3.0;
 
 pub struct Chunk {

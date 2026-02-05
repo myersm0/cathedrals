@@ -100,8 +100,10 @@ fn ingest_file(
 
 	let file_path_str = file_path.to_string_lossy();
 
+	let transaction = connection.unchecked_transaction()?;
+
 	let document_id = storage::insert_document(
-		connection,
+		&transaction,
 		&source_title,
 		merge_strategy,
 		Some(&file_path_str),
@@ -111,7 +113,7 @@ fn ingest_file(
 	for (position, entry) in segmented.iter().enumerate() {
 		let hash = minhash::minhash(&entry.body);
 		let entry_id = storage::insert_entry(
-			connection,
+			&transaction,
 			document_id,
 			entry,
 			position as u32,
@@ -122,9 +124,11 @@ fn ingest_file(
 		)?;
 
 		let chunks = chunking::chunk_text(&entry.body);
-		storage::insert_chunks(connection, entry_id, &chunks)?;
+		storage::insert_chunks(&transaction, entry_id, &chunks)?;
 		total_chunks += chunks.len();
 	}
+
+	transaction.commit()?;
 
 	eprintln!(
 		"  {} entries, {} chunks from \"{}\"",
