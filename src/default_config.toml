@@ -1,12 +1,12 @@
 [[doctype]]
 name = "email"
-source_pattern = "- (Outlook|Mail|Gmail)$"
+source_pattern = "- (Outlook|Mail|Gmail|ProtonMail) -"
 parser = "ollama"
 merge_strategy = "positional"
 
 [[doctype]]
 name = "slack"
-source_pattern = "Slack"
+source_pattern = "- Slack -"
 parser = "ollama"
 merge_strategy = "positional"
 
@@ -18,7 +18,7 @@ merge_strategy = "timestamped"
 
 [[doctype]]
 name = "claude"
-source_pattern = "- Claude( - Brave)?$"
+source_pattern = "- Claude -"
 parser = "markdown"
 merge_strategy = "none"
 
