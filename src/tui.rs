@@ -9,7 +9,7 @@ use ratatui::{
 	layout::{Constraint, Direction, Layout, Rect},
 	style::{Color, Modifier, Style},
 	text::{Line, Span, Text},
-	widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+	widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 	Frame, Terminal,
 };
 use rusqlite::Connection;
@@ -184,6 +184,7 @@ pub fn run(connection: &Connection) -> Result<()> {
 	execute!(stdout, EnterAlternateScreen)?;
 	let backend = CrosstermBackend::new(stdout);
 	let mut terminal = Terminal::new(backend)?;
+	terminal.clear()?;
 
 	let mut app = App::new();
 	app.load_documents(connection)?;
@@ -320,6 +321,8 @@ fn run_app(
 }
 
 fn draw(frame: &mut Frame, app: &App) {
+	frame.render_widget(Clear, frame.area());
+
 	let chunks = Layout::default()
 		.direction(Direction::Vertical)
 		.constraints([
