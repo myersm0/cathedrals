@@ -238,7 +238,7 @@ pub fn search(
 	let mut statement = connection.prepare(
 		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
 		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank,
-		        snippet(chunks_fts, 0, '>>>', '<<<', '...', 12)
+		        snippet(chunks_fts, 0, '\x02', '\x03', '\x01', 12)
 		 FROM chunks_fts f
 		 JOIN chunks c ON c.id = f.rowid
 		 JOIN entries e ON e.id = c.entry_id

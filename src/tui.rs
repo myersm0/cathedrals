@@ -461,12 +461,17 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 
 	let mut all_lines: Vec<(Line, bool)> = Vec::new();
 	let mut chunk_counter = 0usize;
+	let mut in_code_block = false;
 
 	for entry in &doc.entries {
 		if let Some(ref heading) = entry.heading_title {
 			let level = entry.heading_level.unwrap_or(1);
 			let prefix = "#".repeat(level as usize);
-			all_lines.push((Line::from(expand_tabs(&format!("{} {}", prefix, heading))), false));
+			let heading_line = Line::from(Span::styled(
+				expand_tabs(&format!("{} {}", prefix, heading)),
+				Style::default().add_modifier(Modifier::BOLD),
+			));
+			all_lines.push((heading_line, false));
 			all_lines.push((Line::from(""), false));
 		}
 
@@ -477,14 +482,18 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		if entry.chunks.is_empty() {
 			let is_current = chunk_counter == app.current_chunk_index;
 			for body_line in entry.body.lines() {
-				all_lines.push((Line::from(expand_tabs(body_line)), is_current));
+				let (line, new_in_code_block) = render_markdown_line(body_line, in_code_block);
+				in_code_block = new_in_code_block;
+				all_lines.push((line, is_current));
 			}
 			chunk_counter += 1;
 		} else {
 			for chunk in &entry.chunks {
 				let is_current = chunk_counter == app.current_chunk_index;
 				for body_line in chunk.body.lines() {
-					all_lines.push((Line::from(expand_tabs(body_line)), is_current));
+					let (line, new_in_code_block) = render_markdown_line(body_line, in_code_block);
+					in_code_block = new_in_code_block;
+					all_lines.push((line, is_current));
 				}
 				chunk_counter += 1;
 			}
@@ -507,10 +516,13 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		.take(view_height)
 		.map(|(line, is_current)| {
 			if is_current {
-				Line::from(Span::styled(
-					line.to_string(),
-					Style::default().bg(Color::DarkGray),
-				))
+				let spans: Vec<Span> = line.spans.into_iter().map(|span| {
+					Span::styled(
+						span.content.to_string(),
+						span.style.bg(Color::DarkGray),
+					)
+				}).collect();
+				Line::from(spans)
 			} else {
 				line
 			}
@@ -572,17 +584,17 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 
 		for chunk in &result.chunks {
 			let is_current = chunk_counter == app.search_chunk_index;
-			let preview = truncate_string(expand_tabs(&chunk.snippet).replace('\n', " "), 70);
-			let style = if is_current {
+			let base_style = if is_current {
 				Style::default().bg(Color::DarkGray)
 			} else {
 				Style::default()
 			};
 			let prefix = if is_current { "> " } else { "  " };
-			lines.push(Line::from(Span::styled(
-				format!("{}│ {}", prefix, preview),
-				style,
-			)));
+
+			let mut spans = vec![Span::styled(format!("{}│ ", prefix), base_style)];
+			spans.extend(parse_snippet(&chunk.snippet, base_style));
+
+			lines.push(Line::from(spans));
 			chunk_counter += 1;
 		}
 		lines.push(Line::from(""));
@@ -671,4 +683,160 @@ fn truncate_string(s: String, max_len: usize) -> String {
 
 fn expand_tabs(s: &str) -> String {
 	s.replace('\t', "    ")
+}
+
+fn render_markdown_line(line: &str, in_code_block: bool) -> (Line<'static>, bool) {
+	let expanded = expand_tabs(line);
+
+	if expanded.trim().starts_with("```") {
+		let style = Style::default().fg(Color::DarkGray);
+		return (Line::from(Span::styled(expanded, style)), !in_code_block);
+	}
+
+	if in_code_block {
+		let style = Style::default().fg(Color::DarkGray);
+		return (Line::from(Span::styled(expanded, style)), true);
+	}
+
+	if expanded.trim().starts_with("    ") || expanded.trim().starts_with("\t") {
+		let style = Style::default().fg(Color::DarkGray);
+		return (Line::from(Span::styled(expanded, style)), false);
+	}
+
+	let spans = parse_inline_markdown(&expanded);
+	(Line::from(spans), false)
+}
+
+fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
+	let mut spans: Vec<Span<'static>> = Vec::new();
+	let mut current = String::new();
+	let chars: Vec<char> = text.chars().collect();
+	let len = chars.len();
+	let mut i = 0;
+
+	while i < len {
+		if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+			if !current.is_empty() {
+				spans.push(Span::raw(std::mem::take(&mut current)));
+			}
+			i += 2;
+			let mut bold_text = String::new();
+			while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '*') {
+				bold_text.push(chars[i]);
+				i += 1;
+			}
+			if i + 1 < len {
+				i += 2;
+			}
+			if !bold_text.is_empty() {
+				spans.push(Span::styled(bold_text, Style::default().add_modifier(Modifier::BOLD)));
+			}
+		} else if i + 1 < len && chars[i] == '_' && chars[i + 1] == '_' {
+			if !current.is_empty() {
+				spans.push(Span::raw(std::mem::take(&mut current)));
+			}
+			i += 2;
+			let mut bold_text = String::new();
+			while i + 1 < len && !(chars[i] == '_' && chars[i + 1] == '_') {
+				bold_text.push(chars[i]);
+				i += 1;
+			}
+			if i + 1 < len {
+				i += 2;
+			}
+			if !bold_text.is_empty() {
+				spans.push(Span::styled(bold_text, Style::default().add_modifier(Modifier::BOLD)));
+			}
+		} else if chars[i] == '`' {
+			if !current.is_empty() {
+				spans.push(Span::raw(std::mem::take(&mut current)));
+			}
+			i += 1;
+			let mut code_text = String::new();
+			while i < len && chars[i] != '`' {
+				code_text.push(chars[i]);
+				i += 1;
+			}
+			if i < len {
+				i += 1;
+			}
+			if !code_text.is_empty() {
+				spans.push(Span::styled(code_text, Style::default().fg(Color::DarkGray)));
+			}
+		} else if chars[i] == '*' && (i == 0 || chars[i - 1] == ' ') {
+			if !current.is_empty() {
+				spans.push(Span::raw(std::mem::take(&mut current)));
+			}
+			i += 1;
+			let mut italic_text = String::new();
+			while i < len && chars[i] != '*' {
+				italic_text.push(chars[i]);
+				i += 1;
+			}
+			if i < len {
+				i += 1;
+			}
+			if !italic_text.is_empty() {
+				spans.push(Span::styled(italic_text, Style::default().add_modifier(Modifier::ITALIC)));
+			}
+		} else {
+			current.push(chars[i]);
+			i += 1;
+		}
+	}
+
+	if !current.is_empty() {
+		spans.push(Span::raw(current));
+	}
+
+	if spans.is_empty() {
+		spans.push(Span::raw(""));
+	}
+
+	spans
+}
+
+fn parse_snippet<'a>(snippet: &str, base_style: Style) -> Vec<Span<'a>> {
+	let cleaned = expand_tabs(snippet).replace('\n', " ");
+	let with_ellipsis = cleaned.replace('\x01', "…");
+
+	let has_start_ellipsis = with_ellipsis.starts_with('…');
+	let has_end_ellipsis = with_ellipsis.ends_with('…');
+
+	let mut result = String::new();
+	if !has_start_ellipsis {
+		result.push_str("… ");
+	}
+	result.push_str(&with_ellipsis);
+	if !has_end_ellipsis {
+		result.push_str(" …");
+	}
+
+	let bold_style = base_style.add_modifier(Modifier::BOLD);
+	let mut spans: Vec<Span<'a>> = Vec::new();
+	let mut in_match = false;
+	let mut current = String::new();
+
+	for c in result.chars() {
+		if c == '\x02' {
+			if !current.is_empty() {
+				spans.push(Span::styled(std::mem::take(&mut current), base_style));
+			}
+			in_match = true;
+		} else if c == '\x03' {
+			if !current.is_empty() {
+				spans.push(Span::styled(std::mem::take(&mut current), bold_style));
+			}
+			in_match = false;
+		} else {
+			current.push(c);
+		}
+	}
+
+	if !current.is_empty() {
+		let style = if in_match { bold_style } else { base_style };
+		spans.push(Span::styled(current, style));
+	}
+
+	spans
 }
