@@ -16,7 +16,7 @@ use rusqlite::Connection;
 use std::io;
 
 use crate::storage::{
-	self, DocumentContent, DocumentSummary, EntryContent,
+	self, DocumentContent, DocumentSummary,
 	GroupedSearchResult, SortColumn, SortDirection,
 };
 
@@ -29,12 +29,15 @@ enum Mode {
 
 struct App {
 	mode: Mode,
+	previous_mode: Mode,
 	documents: Vec<DocumentSummary>,
 	browse_state: ListState,
 	sort_column: SortColumn,
 	sort_direction: SortDirection,
 	current_document: Option<DocumentContent>,
 	scroll_offset: usize,
+	current_chunk_index: usize,
+	total_chunks: usize,
 	search_query: String,
 	search_results: Vec<GroupedSearchResult>,
 	search_state: ListState,
@@ -50,12 +53,15 @@ impl App {
 		search_state.select(Some(0));
 		App {
 			mode: Mode::Browse,
+			previous_mode: Mode::Browse,
 			documents: Vec::new(),
 			browse_state,
 			sort_column: SortColumn::Date,
 			sort_direction: SortDirection::Descending,
 			current_document: None,
 			scroll_offset: 0,
+			current_chunk_index: 0,
+			total_chunks: 0,
 			search_query: String::new(),
 			search_results: Vec::new(),
 			search_state,
@@ -79,6 +85,11 @@ impl App {
 			if let Some(doc) = self.documents.get(selected) {
 				self.current_document = storage::get_document(connection, doc.id)?;
 				self.scroll_offset = 0;
+				self.current_chunk_index = 0;
+				self.total_chunks = self.current_document.as_ref()
+					.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+					.unwrap_or(0);
+				self.previous_mode = Mode::Browse;
 				self.mode = Mode::Read;
 			}
 		}
@@ -104,6 +115,11 @@ impl App {
 			if let Some(result) = self.search_results.get(selected) {
 				self.current_document = storage::get_document(connection, result.document_id)?;
 				self.scroll_offset = 0;
+				self.current_chunk_index = 0;
+				self.total_chunks = self.current_document.as_ref()
+					.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+					.unwrap_or(0);
+				self.previous_mode = Mode::Search;
 				self.mode = Mode::Read;
 			}
 		}
@@ -112,16 +128,34 @@ impl App {
 
 	fn yank_current_chunk(&mut self) {
 		if let Some(ref doc) = self.current_document {
-			let all_text: String = doc.entries.iter()
-				.map(|e| format_entry_for_display(e))
-				.collect::<Vec<_>>()
-				.join("\n\n");
+			let mut chunk_counter = 0usize;
+			let mut chunk_text: Option<String> = None;
 
-			if let Ok(mut clipboard) = arboard::Clipboard::new() {
-				if clipboard.set_text(&all_text).is_ok() {
-					self.status_message = Some("Copied to clipboard".to_string());
+			'outer: for entry in &doc.entries {
+				if entry.chunks.is_empty() {
+					if chunk_counter == self.current_chunk_index {
+						chunk_text = Some(entry.body.clone());
+						break 'outer;
+					}
+					chunk_counter += 1;
 				} else {
-					self.status_message = Some("Failed to copy".to_string());
+					for chunk in &entry.chunks {
+						if chunk_counter == self.current_chunk_index {
+							chunk_text = Some(chunk.body.clone());
+							break 'outer;
+						}
+						chunk_counter += 1;
+					}
+				}
+			}
+
+			if let Some(text) = chunk_text {
+				if let Ok(mut clipboard) = arboard::Clipboard::new() {
+					if clipboard.set_text(&text).is_ok() {
+						self.status_message = Some("Copied chunk to clipboard".to_string());
+					} else {
+						self.status_message = Some("Failed to copy".to_string());
+					}
 				}
 			}
 		}
@@ -142,20 +176,6 @@ impl App {
 			SortDirection::Descending => SortDirection::Ascending,
 		};
 	}
-}
-
-fn format_entry_for_display(entry: &EntryContent) -> String {
-	let mut lines = Vec::new();
-	if let Some(ref title) = entry.heading_title {
-		let prefix = "#".repeat(entry.heading_level.unwrap_or(1) as usize);
-		lines.push(format!("{} {}", prefix, title));
-		lines.push(String::new());
-	}
-	if let Some(ref author) = entry.author {
-		lines.push(format!("[{}]", author));
-	}
-	lines.push(entry.body.clone());
-	lines.join("\n")
 }
 
 pub fn run(connection: &Connection) -> Result<()> {
@@ -230,22 +250,24 @@ fn run_app(
 				Mode::Read => match key.code {
 					KeyCode::Char('q') => app.should_quit = true,
 					KeyCode::Char('b') | KeyCode::Esc => {
-						app.mode = Mode::Browse;
+						app.mode = app.previous_mode;
 						app.current_document = None;
 					}
 					KeyCode::Up => {
-						if app.scroll_offset > 0 {
-							app.scroll_offset -= 1;
+						if app.current_chunk_index > 0 {
+							app.current_chunk_index -= 1;
 						}
 					}
 					KeyCode::Down => {
-						app.scroll_offset += 1;
+						if app.current_chunk_index + 1 < app.total_chunks {
+							app.current_chunk_index += 1;
+						}
 					}
 					KeyCode::PageUp => {
-						app.scroll_offset = app.scroll_offset.saturating_sub(20);
+						app.current_chunk_index = app.current_chunk_index.saturating_sub(5);
 					}
 					KeyCode::PageDown => {
-						app.scroll_offset += 20;
+						app.current_chunk_index = (app.current_chunk_index + 5).min(app.total_chunks.saturating_sub(1));
 					}
 					KeyCode::Char('y') => {
 						app.yank_current_chunk();
@@ -316,6 +338,11 @@ fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
+	let chunks = Layout::default()
+		.direction(Direction::Vertical)
+		.constraints([Constraint::Length(2), Constraint::Min(1)])
+		.split(area);
+
 	let sort_indicator = |col: SortColumn| {
 		if app.sort_column == col {
 			match app.sort_direction {
@@ -323,71 +350,61 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 				SortDirection::Descending => " ▼",
 			}
 		} else {
-			""
+			"  "
 		}
 	};
 
-	let _header = Line::from(vec![
+	let header = Line::from(vec![
+		Span::raw("  "),
 		Span::styled(
-			format!("Title{}", sort_indicator(SortColumn::Title)),
+			format!("{:<48}", format!("Title{}", sort_indicator(SortColumn::Title))),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
-		Span::raw("  │  "),
+		Span::raw("│ "),
 		Span::styled(
-			format!("Source{}", sort_indicator(SortColumn::Source)),
+			format!("{:<40}", format!("Source{}", sort_indicator(SortColumn::Source))),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
-		Span::raw("  │  "),
+		Span::raw("│ "),
 		Span::styled(
-			format!("Type{}", sort_indicator(SortColumn::Doctype)),
+			format!("{:<12}", format!("Type{}", sort_indicator(SortColumn::Doctype))),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
-		Span::raw("  │  "),
+		Span::raw("│ "),
 		Span::styled(
 			format!("Date{}", sort_indicator(SortColumn::Date)),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 	]);
 
+	let header_para = Paragraph::new(header)
+		.block(Block::default()
+			.title(format!(" BROWSE ({} documents) ", app.documents.len()))
+			.borders(Borders::TOP | Borders::LEFT | Borders::RIGHT));
+	frame.render_widget(header_para, chunks[0]);
+
 	let items: Vec<ListItem> = app
 		.documents
 		.iter()
 		.map(|doc| {
-			let title = doc.title.as_deref()
-				.unwrap_or_else(|| truncate_str(&doc.source_title, 30));
-			let source = truncate_str(&doc.source_title, 25);
+			let title = doc.title.as_deref().unwrap_or("-");
+			let source = truncate_str(&doc.source_title, 38);
 			let doctype = doc.doctype_name.as_deref().unwrap_or("-");
 			let date = &doc.clip_date[..10.min(doc.clip_date.len())];
 			ListItem::new(Line::from(vec![
-				Span::raw(format!("{:<32}", truncate_str(title, 30))),
+				Span::raw(format!("{:<48}", truncate_str(title, 46))),
 				Span::raw("│ "),
-				Span::styled(
-					format!("{:<27}", source),
-					Style::default().fg(Color::Cyan),
-				),
+				Span::raw(format!("{:<40}", source)),
 				Span::raw("│ "),
-				Span::styled(
-					format!("{:<10}", doctype),
-					Style::default().fg(Color::Yellow),
-				),
+				Span::raw(format!("{:<12}", doctype)),
 				Span::raw("│ "),
-				Span::styled(date.to_string(), Style::default().fg(Color::Green)),
+				Span::raw(date.to_string()),
 			]))
 		})
 		.collect();
 
 	let list = List::new(items)
-		.block(
-			Block::default()
-				.title(Line::from(vec![
-					Span::raw(" BROWSE "),
-					Span::styled(
-						format!("({} documents)", app.documents.len()),
-						Style::default().fg(Color::DarkGray),
-					),
-				]))
-				.borders(Borders::ALL),
-		)
+		.block(Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT))
 		.highlight_style(
 			Style::default()
 				.bg(Color::DarkGray)
@@ -395,7 +412,7 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		)
 		.highlight_symbol("> ");
 
-	frame.render_stateful_widget(list, area, &mut app.browse_state.clone());
+	frame.render_stateful_widget(list, chunks[1], &mut app.browse_state.clone());
 }
 
 fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
@@ -405,55 +422,72 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 
 	let title = doc.title.as_deref().unwrap_or(&doc.source_title);
 
-	let mut lines: Vec<Line> = Vec::new();
+	let mut all_lines: Vec<(Line, bool)> = Vec::new();
+	let mut chunk_counter = 0usize;
+
 	for entry in &doc.entries {
 		if let Some(ref heading) = entry.heading_title {
 			let level = entry.heading_level.unwrap_or(1);
-			let style = match level {
-				1 => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-				2 => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-				_ => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-			};
 			let prefix = "#".repeat(level as usize);
-			lines.push(Line::from(Span::styled(
-				format!("{} {}", prefix, heading),
-				style,
-			)));
-			lines.push(Line::from(""));
+			all_lines.push((Line::from(format!("{} {}", prefix, heading)), false));
+			all_lines.push((Line::from(""), false));
 		}
 
 		if let Some(ref author) = entry.author {
-			lines.push(Line::from(Span::styled(
-				format!("[{}]", author),
-				Style::default().fg(Color::Magenta),
-			)));
+			all_lines.push((Line::from(format!("[{}]", author)), false));
 		}
 
-		for body_line in entry.body.lines() {
-			let styled = if body_line.starts_with("```") || body_line.starts_with("    ") {
-				Line::from(Span::styled(body_line, Style::default().fg(Color::Green)))
-			} else if body_line.starts_with("- ") || body_line.starts_with("* ") {
-				Line::from(Span::styled(body_line, Style::default().fg(Color::White)))
-			} else {
-				Line::from(body_line)
-			};
-			lines.push(styled);
+		if entry.chunks.is_empty() {
+			let is_current = chunk_counter == app.current_chunk_index;
+			for body_line in entry.body.lines() {
+				all_lines.push((Line::from(body_line), is_current));
+			}
+			chunk_counter += 1;
+		} else {
+			for chunk in &entry.chunks {
+				let is_current = chunk_counter == app.current_chunk_index;
+				for body_line in chunk.body.lines() {
+					all_lines.push((Line::from(body_line), is_current));
+				}
+				chunk_counter += 1;
+			}
 		}
-		lines.push(Line::from(""));
+		all_lines.push((Line::from(""), false));
 	}
 
-	let visible_lines: Vec<Line> = lines
+	let first_current_line = all_lines.iter()
+		.enumerate()
+		.find(|(_, (_, is_current))| *is_current)
+		.map(|(i, _)| i)
+		.unwrap_or(0);
+
+	let view_height = area.height.saturating_sub(2) as usize;
+	let scroll = first_current_line.saturating_sub(view_height / 3);
+
+	let visible_lines: Vec<Line> = all_lines
 		.into_iter()
-		.skip(app.scroll_offset)
+		.skip(scroll)
+		.take(view_height)
+		.map(|(line, is_current)| {
+			if is_current {
+				Line::from(Span::styled(
+					line.to_string(),
+					Style::default().bg(Color::DarkGray),
+				))
+			} else {
+				line
+			}
+		})
 		.collect();
 
 	let paragraph = Paragraph::new(Text::from(visible_lines))
 		.block(
 			Block::default()
 				.title(format!(
-					" {} ({} entries) ",
+					" {} (chunk {}/{}) ",
 					truncate_str(title, 50),
-					doc.entries.len()
+					app.current_chunk_index + 1,
+					app.total_chunks.max(1),
 				))
 				.borders(Borders::ALL),
 		)
@@ -529,7 +563,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let help_text = match app.mode {
 		Mode::Browse => "[↑↓] move  [Enter] open  [/] search  [s] sort  [S] direction  [q] quit",
-		Mode::Read => "[↑↓] scroll  [PgUp/PgDn] page  [y] yank  [b] back  [/] search  [q] quit",
+		Mode::Read => "[↑↓] chunk  [PgUp/PgDn] jump  [y] yank  [b] back  [/] search  [q] quit",
 		Mode::Search => "[↑↓] move  [Enter] open  [Esc] cancel",
 	};
 
