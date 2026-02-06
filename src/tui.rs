@@ -734,6 +734,26 @@ fn align_table(rows: &[&str]) -> Vec<String> {
 		return rows.iter().map(|s| s.to_string()).collect();
 	}
 
+	let cell_widths: Vec<Vec<usize>> = parsed
+		.iter()
+		.zip(rows.iter())
+		.filter(|(_, orig)| !is_separator_row(orig))
+		.map(|(cells, _)| {
+			cells.iter().map(|c| c.chars().count()).collect()
+		})
+		.collect();
+
+	if cell_widths.len() >= 2 {
+		let first_widths = &cell_widths[0];
+		let already_aligned = cell_widths[1..].iter().all(|row_widths| {
+			row_widths.len() == first_widths.len()
+				&& row_widths.iter().zip(first_widths.iter()).all(|(a, b)| a == b)
+		});
+		if already_aligned {
+			return rows.iter().map(|s| s.to_string()).collect();
+		}
+	}
+
 	let mut widths: Vec<usize> = vec![0; column_count];
 	for row in &parsed {
 		for (col_index, cell) in row.iter().enumerate() {
