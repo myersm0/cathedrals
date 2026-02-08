@@ -104,19 +104,15 @@ impl App {
 			.unwrap_or(0);
 
 		if let Some(ref doc) = self.current_document {
-			if let Some(ref title) = doc.title {
-				if is_meaningful_title(title) {
-					self.group_docs = self.documents.iter()
-						.filter(|d| d.title.as_ref().map(|t| t == title).unwrap_or(false))
-						.map(|d| d.id)
-						.collect();
-					self.group_index = self.group_docs.iter()
-						.position(|&id| id == doc_id)
-						.unwrap_or(0);
-				} else {
-					self.group_docs.clear();
-					self.group_index = 0;
-				}
+			let group_key = extract_group_key(&doc.source_title);
+			if let Some(ref key) = group_key {
+				self.group_docs = self.documents.iter()
+					.filter(|d| extract_group_key(&d.source_title).as_ref() == Some(key))
+					.map(|d| d.id)
+					.collect();
+				self.group_index = self.group_docs.iter()
+					.position(|&id| id == doc_id)
+					.unwrap_or(0);
 			} else {
 				self.group_docs.clear();
 				self.group_index = 0;
@@ -519,8 +515,6 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		return;
 	};
 
-	let title = doc.title.as_deref().unwrap_or(&doc.source_title);
-
 	let mut all_lines: Vec<(Line, bool)> = Vec::new();
 	let mut chunk_counter = 0usize;
 	let mut in_code_block = false;
@@ -599,6 +593,13 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		String::new()
 	};
 
+	let display_title = if app.group_docs.len() > 1 {
+		extract_group_key(&doc.source_title)
+			.unwrap_or_else(|| doc.title.clone().unwrap_or_else(|| doc.source_title.clone()))
+	} else {
+		doc.title.clone().unwrap_or_else(|| doc.source_title.clone())
+	};
+
 	let date_str = &doc.clip_date[..10.min(doc.clip_date.len())];
 
 	let paragraph = Paragraph::new(Text::from(visible_lines))
@@ -606,7 +607,7 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 			Block::default()
 				.title(format!(
 					" {} | {} | chunk {}/{}{}",
-					truncate_str(title, 40),
+					truncate_str(&display_title, 40),
 					date_str,
 					app.current_chunk_index + 1,
 					app.total_chunks.max(1),
@@ -1027,36 +1028,51 @@ fn parse_snippet<'a>(snippet: &str, base_style: Style) -> Vec<Span<'a>> {
 	spans
 }
 
-fn is_meaningful_title(title: &str) -> bool {
-	let lower = title.to_lowercase();
+fn extract_group_key(source_title: &str) -> Option<String> {
+	let suffixes = [
+		" - Claude - Brave",
+		" - Claude",
+		" — Claude - Brave", 
+		" — Claude",
+		" - Brave",
+		" - Firefox",
+		" - Chrome",
+		" - Safari",
+	];
 
-	if lower.is_empty() {
-		return false;
+	let mut key = source_title.to_string();
+	for suffix in suffixes {
+		if let Some(stripped) = key.strip_suffix(suffix) {
+			key = stripped.to_string();
+			break;
+		}
 	}
 
-	let generic_patterns = [
+	let key = key.trim();
+
+	if key.is_empty() {
+		return None;
+	}
+
+	let lower = key.to_lowercase();
+	let generic = [
 		"untitled",
-		"-bash",
+		"new tab",
 		"bash",
 		"zsh",
 		"terminal",
 		"new document",
-		"document",
 	];
 
-	for pattern in generic_patterns {
+	for pattern in generic {
 		if lower.contains(pattern) {
-			return false;
+			return None;
 		}
 	}
 
-	if title.chars().all(|c| c.is_ascii_digit() || c == '_' || c == '-' || c == '.') {
-		return false;
+	if key.len() < 3 {
+		return None;
 	}
 
-	if title.len() < 3 {
-		return false;
-	}
-
-	true
+	Some(key.to_string())
 }

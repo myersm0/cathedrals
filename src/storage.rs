@@ -458,7 +458,7 @@ pub fn list_documents(
 		"SELECT d.id, d.title, d.source_title, d.doctype_name, d.clip_date,
 		        COUNT(DISTINCT e.id) as entry_count,
 		        COUNT(c.id) as chunk_count,
-		        (SELECT SUBSTR(body, 1, 100) FROM entries WHERE document_id = d.id ORDER BY position LIMIT 1) as first_line
+		        (SELECT SUBSTR(body, 1, 100) FROM entries WHERE document_id = d.id AND LENGTH(TRIM(body)) > 0 ORDER BY position LIMIT 1) as first_line
 		 FROM documents d
 		 LEFT JOIN entries e ON e.document_id = d.id
 		 LEFT JOIN chunks c ON c.entry_id = e.id
