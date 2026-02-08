@@ -12,6 +12,8 @@ pub enum Parser {
 	Markdown,
 	Whisper,
 	Whole,
+	#[serde(rename = "copilot_email")]
+	CopilotEmail,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +70,7 @@ fn parse_parser(value: &str) -> Result<Parser> {
 		"markdown" => Ok(Parser::Markdown),
 		"whisper" => Ok(Parser::Whisper),
 		"whole" => Ok(Parser::Whole),
+		"copilot_email" => Ok(Parser::CopilotEmail),
 		other => anyhow::bail!("unknown parser: {}", other),
 	}
 }
@@ -149,6 +152,29 @@ impl Config {
 			return Some(m);
 		}
 
+		if looks_like_copilot_email(content) {
+			for doctype in &self.doctypes {
+				if doctype.parser == Parser::CopilotEmail {
+					return Some(DoctypeMatch {
+						name: doctype.name.clone(),
+						parser: doctype.parser,
+						merge_strategy: doctype.merge_strategy,
+						prompt: doctype.prompt.clone(),
+						cleanup_patterns: doctype.cleanup_patterns.clone(),
+						merge_consecutive_same_author: doctype.merge_consecutive_same_author,
+					});
+				}
+			}
+			return Some(DoctypeMatch {
+				name: "copilot_email".to_string(),
+				parser: Parser::CopilotEmail,
+				merge_strategy: MergeStrategy::Positional,
+				prompt: None,
+				cleanup_patterns: vec![],
+				merge_consecutive_same_author: false,
+			});
+		}
+
 		if looks_like_markdown(content) {
 			for doctype in &self.doctypes {
 				if doctype.parser == Parser::Markdown {
@@ -174,6 +200,22 @@ impl Config {
 
 		None
 	}
+}
+
+fn looks_like_copilot_email(content: &str) -> bool {
+	let has_email_delimiter = content.contains("\nEMAIL\n") 
+		|| content.contains("\n### EMAIL\n")
+		|| content.contains("\n##EMAIL\n")
+		|| content.contains("\n#EMAIL\n");
+	
+	if !has_email_delimiter {
+		return false;
+	}
+
+	let has_from = content.to_lowercase().contains("\nfrom:");
+	let has_date = content.to_lowercase().contains("\ndate:");
+	
+	has_from && has_date
 }
 
 fn looks_like_markdown(content: &str) -> bool {

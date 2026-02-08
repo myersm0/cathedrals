@@ -223,3 +223,96 @@ pub fn parse_clip_date(filename: &str) -> Option<chrono::NaiveDateTime> {
 fn segmentation_system_prompt() -> &'static str {
 	include_str!("prompts/segmentation.txt")
 }
+
+pub fn parse_copilot_email_summary(text: &str) -> Vec<SegmentedEntry> {
+	let outlook_suffix = Regex::new(r"\s*\[.*?\|\s*Outlook\]\s*$").unwrap();
+
+	let chunks: Vec<&str> = text.split("\nEMAIL\n")
+		.flat_map(|s| s.split("\nEMAIL\r\n"))
+		.flat_map(|s| s.split("\n#EMAIL\n"))
+		.flat_map(|s| s.split("\n### EMAIL\n"))
+		.flat_map(|s| s.split("\n##EMAIL\n"))
+		.collect();
+
+	let mut entries = Vec::new();
+
+	for chunk in chunks {
+		let chunk = chunk.trim();
+		if chunk.is_empty() {
+			continue;
+		}
+
+		let lines: Vec<&str> = chunk.lines().collect();
+		if lines.is_empty() {
+			continue;
+		}
+
+		let mut from: Option<String> = None;
+		let mut date: Option<String> = None;
+		let mut subject: Option<String> = None;
+		let mut body_start = 0;
+
+		for (i, line) in lines.iter().enumerate() {
+			let line_lower = line.to_lowercase();
+			if line_lower.starts_with("from:") {
+				from = Some(line[5..].trim().to_string());
+			} else if line_lower.starts_with("date:") {
+				date = Some(line[5..].trim().to_string());
+			} else if line_lower.starts_with("subject:") {
+				subject = Some(line[8..].trim().to_string());
+			} else if line.trim().is_empty() && (from.is_some() || date.is_some() || subject.is_some()) {
+				body_start = i + 1;
+				break;
+			} else if !line_lower.starts_with("to:") && !line_lower.starts_with("cc:") {
+				body_start = i;
+				break;
+			}
+		}
+
+		let body = lines[body_start..].join("\n");
+		let body = outlook_suffix.replace_all(&body, "").trim().to_string();
+
+		if body.is_empty() && from.is_none() && date.is_none() {
+			continue;
+		}
+
+		entries.push(SegmentedEntry {
+			start_line: 0,
+			end_line: 0,
+			body,
+			author: from,
+			timestamp: date,
+			is_quote: false,
+			heading_level: None,
+			heading_title: subject,
+		});
+	}
+
+	entries
+}
+
+pub fn normalize_email_subject(subject: &str) -> String {
+	let mut s = subject.to_lowercase();
+	loop {
+		let trimmed = s.trim();
+		if let Some(rest) = trimmed.strip_prefix("re:") {
+			s = rest.to_string();
+		} else if let Some(rest) = trimmed.strip_prefix("fwd:") {
+			s = rest.to_string();
+		} else if let Some(rest) = trimmed.strip_prefix("fw:") {
+			s = rest.to_string();
+		} else {
+			break;
+		}
+	}
+	s.trim().to_string()
+}
+
+pub fn email_entry_key(entry: &SegmentedEntry) -> Option<(String, String, String)> {
+	let from = entry.author.as_ref()?;
+	let date = entry.timestamp.as_ref()?;
+	let subject = entry.heading_title.as_ref()
+		.map(|s| normalize_email_subject(s))
+		.unwrap_or_default();
+	Some((from.to_lowercase(), date.clone(), subject))
+}

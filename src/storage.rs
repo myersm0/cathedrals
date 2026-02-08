@@ -424,11 +424,11 @@ pub struct DocumentSummary {
 	pub clip_date: String,
 	pub entry_count: i64,
 	pub chunk_count: i64,
+	pub first_line: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
-	Title,
 	Source,
 	Doctype,
 	Date,
@@ -446,7 +446,6 @@ pub fn list_documents(
 	sort_direction: SortDirection,
 ) -> Result<Vec<DocumentSummary>> {
 	let order_col = match sort_column {
-		SortColumn::Title => "COALESCE(d.title, d.source_title)",
 		SortColumn::Source => "d.source_title",
 		SortColumn::Doctype => "d.doctype_name",
 		SortColumn::Date => "d.clip_date",
@@ -458,7 +457,8 @@ pub fn list_documents(
 	let query = format!(
 		"SELECT d.id, d.title, d.source_title, d.doctype_name, d.clip_date,
 		        COUNT(DISTINCT e.id) as entry_count,
-		        COUNT(c.id) as chunk_count
+		        COUNT(c.id) as chunk_count,
+		        (SELECT SUBSTR(body, 1, 100) FROM entries WHERE document_id = d.id ORDER BY position LIMIT 1) as first_line
 		 FROM documents d
 		 LEFT JOIN entries e ON e.document_id = d.id
 		 LEFT JOIN chunks c ON c.entry_id = e.id
@@ -477,6 +477,7 @@ pub fn list_documents(
 				clip_date: row.get(4)?,
 				entry_count: row.get(5)?,
 				chunk_count: row.get(6)?,
+				first_line: row.get(7)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;

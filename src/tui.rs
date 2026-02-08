@@ -45,6 +45,8 @@ struct App {
 	total_search_chunks: usize,
 	should_quit: bool,
 	status_message: Option<String>,
+	group_docs: Vec<i64>,
+	group_index: usize,
 }
 
 impl App {
@@ -69,6 +71,8 @@ impl App {
 			total_search_chunks: 0,
 			should_quit: false,
 			status_message: None,
+			group_docs: Vec::new(),
+			group_index: 0,
 		}
 	}
 
@@ -85,15 +89,62 @@ impl App {
 	fn open_selected_document(&mut self, connection: &Connection) -> Result<()> {
 		if let Some(selected) = self.browse_state.selected() {
 			if let Some(doc) = self.documents.get(selected) {
-				self.current_document = storage::get_document(connection, doc.id)?;
-				self.scroll_offset = 0;
-				self.current_chunk_index = 0;
-				self.total_chunks = self.current_document.as_ref()
-					.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
-					.unwrap_or(0);
-				self.previous_mode = Mode::Browse;
-				self.mode = Mode::Read;
+				self.open_document_by_id(connection, doc.id)?;
 			}
+		}
+		Ok(())
+	}
+
+	fn open_document_by_id(&mut self, connection: &Connection, doc_id: i64) -> Result<()> {
+		self.current_document = storage::get_document(connection, doc_id)?;
+		self.scroll_offset = 0;
+		self.current_chunk_index = 0;
+		self.total_chunks = self.current_document.as_ref()
+			.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+			.unwrap_or(0);
+
+		if let Some(ref doc) = self.current_document {
+			if let Some(ref title) = doc.title {
+				if is_meaningful_title(title) {
+					self.group_docs = self.documents.iter()
+						.filter(|d| d.title.as_ref().map(|t| t == title).unwrap_or(false))
+						.map(|d| d.id)
+						.collect();
+					self.group_index = self.group_docs.iter()
+						.position(|&id| id == doc_id)
+						.unwrap_or(0);
+				} else {
+					self.group_docs.clear();
+					self.group_index = 0;
+				}
+			} else {
+				self.group_docs.clear();
+				self.group_index = 0;
+			}
+		}
+
+		self.previous_mode = Mode::Browse;
+		self.mode = Mode::Read;
+		Ok(())
+	}
+
+	fn navigate_group(&mut self, connection: &Connection, delta: i32) -> Result<()> {
+		if self.group_docs.len() <= 1 {
+			return Ok(());
+		}
+		let new_index = if delta > 0 {
+			(self.group_index + 1) % self.group_docs.len()
+		} else {
+			(self.group_index + self.group_docs.len() - 1) % self.group_docs.len()
+		};
+		if let Some(&doc_id) = self.group_docs.get(new_index) {
+			self.group_index = new_index;
+			self.current_document = storage::get_document(connection, doc_id)?;
+			self.scroll_offset = 0;
+			self.current_chunk_index = 0;
+			self.total_chunks = self.current_document.as_ref()
+				.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+				.unwrap_or(0);
 		}
 		Ok(())
 	}
@@ -198,10 +249,9 @@ impl App {
 
 	fn cycle_sort(&mut self) {
 		self.sort_column = match self.sort_column {
-			SortColumn::Title => SortColumn::Source,
 			SortColumn::Source => SortColumn::Doctype,
 			SortColumn::Doctype => SortColumn::Date,
-			SortColumn::Date => SortColumn::Title,
+			SortColumn::Date => SortColumn::Source,
 		};
 	}
 
@@ -311,6 +361,12 @@ fn run_app(
 					KeyCode::Char('/') => {
 						app.mode = Mode::Search;
 					}
+					KeyCode::Left => {
+						app.navigate_group(connection, -1)?;
+					}
+					KeyCode::Right => {
+						app.navigate_group(connection, 1)?;
+					}
 					_ => {}
 				},
 				Mode::Search => match key.code {
@@ -394,22 +450,22 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 	let header = Line::from(vec![
 		Span::raw("  "),
 		Span::styled(
-			format!("{:<48}", format!("Title{}", sort_indicator(SortColumn::Title))),
+			format!("{:<45}", format!("Source{}", sort_indicator(SortColumn::Source))),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 		Span::raw("│ "),
 		Span::styled(
-			format!("{:<40}", format!("Source{}", sort_indicator(SortColumn::Source))),
+			format!("{:<10}", format!("Type{}", sort_indicator(SortColumn::Doctype))),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 		Span::raw("│ "),
 		Span::styled(
-			format!("{:<12}", format!("Type{}", sort_indicator(SortColumn::Doctype))),
+			format!("{:<12}", format!("Date{}", sort_indicator(SortColumn::Date))),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 		Span::raw("│ "),
 		Span::styled(
-			format!("Date{}", sort_indicator(SortColumn::Date)),
+			"Preview",
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 	]);
@@ -424,18 +480,24 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		.documents
 		.iter()
 		.map(|doc| {
-			let title = doc.title.as_deref().unwrap_or("-");
-			let source = truncate_str(&doc.source_title, 38);
+			let source = truncate_str(&doc.source_title, 43);
 			let doctype = doc.doctype_name.as_deref().unwrap_or("-");
 			let date = &doc.clip_date[..10.min(doc.clip_date.len())];
+			let first_line = doc.first_line.as_deref()
+				.map(|s| s.lines().next().unwrap_or(""))
+				.map(|s| s.trim())
+				.unwrap_or("-");
 			ListItem::new(Line::from(vec![
-				Span::raw(format!("{:<48}", truncate_str(title, 46))),
+				Span::raw(format!("{:<45}", source)),
 				Span::raw("│ "),
-				Span::raw(format!("{:<40}", source)),
+				Span::raw(format!("{:<10}", truncate_str(doctype, 8))),
 				Span::raw("│ "),
-				Span::raw(format!("{:<12}", doctype)),
+				Span::raw(format!("{:<12}", date)),
 				Span::raw("│ "),
-				Span::raw(date.to_string()),
+				Span::styled(
+					truncate_str(first_line, 50).to_string(),
+					Style::default().fg(Color::DarkGray),
+				),
 			]))
 		})
 		.collect();
@@ -531,14 +593,24 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		})
 		.collect();
 
+	let group_info = if app.group_docs.len() > 1 {
+		format!(" [◀ {}/{} ▶]", app.group_index + 1, app.group_docs.len())
+	} else {
+		String::new()
+	};
+
+	let date_str = &doc.clip_date[..10.min(doc.clip_date.len())];
+
 	let paragraph = Paragraph::new(Text::from(visible_lines))
 		.block(
 			Block::default()
 				.title(format!(
-					" {} (chunk {}/{}) ",
-					truncate_str(title, 50),
+					" {} | {} | chunk {}/{}{}",
+					truncate_str(title, 40),
+					date_str,
 					app.current_chunk_index + 1,
 					app.total_chunks.max(1),
+					group_info,
 				))
 				.borders(Borders::ALL),
 		)
@@ -638,9 +710,15 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+	let read_help = if app.group_docs.len() > 1 {
+		"[↑↓] chunk  [◀▶] group  [PgUp/Dn] jump  [y] yank  [b] back  [q] quit"
+	} else {
+		"[↑↓] chunk  [PgUp/PgDn] jump  [y] yank  [b] back  [/] search  [q] quit"
+	};
+
 	let help_text = match app.mode {
 		Mode::Browse => "[↑↓] move  [Enter] open  [/] search  [s] sort  [S] direction  [q] quit",
-		Mode::Read => "[↑↓] chunk  [PgUp/PgDn] jump  [y] yank  [b] back  [/] search  [q] quit",
+		Mode::Read => read_help,
 		Mode::Search => "[↑↓] chunk  [Enter] open  [Tab] sort  [Esc] back",
 	};
 
@@ -947,4 +1025,38 @@ fn parse_snippet<'a>(snippet: &str, base_style: Style) -> Vec<Span<'a>> {
 	}
 
 	spans
+}
+
+fn is_meaningful_title(title: &str) -> bool {
+	let lower = title.to_lowercase();
+
+	if lower.is_empty() {
+		return false;
+	}
+
+	let generic_patterns = [
+		"untitled",
+		"-bash",
+		"bash",
+		"zsh",
+		"terminal",
+		"new document",
+		"document",
+	];
+
+	for pattern in generic_patterns {
+		if lower.contains(pattern) {
+			return false;
+		}
+	}
+
+	if title.chars().all(|c| c.is_ascii_digit() || c == '_' || c == '-' || c == '.') {
+		return false;
+	}
+
+	if title.len() < 3 {
+		return false;
+	}
+
+	true
 }

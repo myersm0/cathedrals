@@ -1,4 +1,10 @@
 [[doctype]]
+name = "copilot_email"
+source_pattern = "Copilot"
+parser = "copilot_email"
+merge_strategy = "positional"
+
+[[doctype]]
 name = "email"
 source_pattern = "- (Outlook|Mail|Gmail)( - Brave)?$"
 parser = "ollama"

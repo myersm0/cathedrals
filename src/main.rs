@@ -87,6 +87,7 @@ fn ingest_file(
 
 	let segmented = match parser {
 		Parser::Markdown => markdown::parse_markdown_sections(&body),
+		Parser::CopilotEmail => ingest::parse_copilot_email_summary(&body),
 		Parser::Ollama => {
 			let result = ollama.segment(&source_title, &body, &segmentation_options)?;
 			result.entries
