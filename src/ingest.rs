@@ -19,6 +19,17 @@ struct OllamaResponse {
 	response: String,
 }
 
+#[derive(Serialize)]
+struct OllamaEmbeddingRequest {
+	model: String,
+	prompt: String,
+}
+
+#[derive(Deserialize)]
+struct OllamaEmbeddingResponse {
+	embedding: Vec<f32>,
+}
+
 #[derive(Deserialize)]
 struct SegmentationJson {
 	entries: Vec<SegmentedEntryJson>,
@@ -148,6 +159,22 @@ impl OllamaClient {
 		}
 
 		Ok(SegmentationResult { entries })
+	}
+
+	pub fn embed(&self, text: &str, model: &str) -> Result<Vec<f32>> {
+		let request = OllamaEmbeddingRequest {
+			model: model.to_string(),
+			prompt: text.to_string(),
+		};
+
+		let response: OllamaEmbeddingResponse = self
+			.client
+			.post(format!("{}/api/embeddings", self.base_url))
+			.json(&request)
+			.send()?
+			.json()?;
+
+		Ok(response.embedding)
 	}
 }
 

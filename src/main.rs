@@ -228,7 +228,9 @@ fn print_usage() {
 		"usage:
   cathedrals browse                    interactive TUI (default)
   cathedrals ingest <directory>        ingest new files from directory
-  cathedrals search <query>            search chunks
+  cathedrals embed                     compute embeddings for chunks
+  cathedrals similar <query>           semantic search using embeddings
+  cathedrals search <query>            keyword search chunks
   cathedrals dump [filter]             dump documents
   cathedrals stats                     show database statistics
 
@@ -236,8 +238,10 @@ options:
   --db <path>          database path (default: $XDG_DATA_HOME/cathedrals/cathedrals.db)
   --config <path>      config file (default: $XDG_CONFIG_HOME/cathedrals/config.toml)
   --ollama <url>       ollama endpoint (default: http://localhost:11434)
-  --model <n>          ollama model (default: mistral-nemo)
+  --model <n>          ollama model for segmentation (default: mistral-nemo)
+  --embed-model <n>    ollama model for embeddings (default: nomic-embed-text)
   --force              re-ingest files even if already in database
+  --limit <n>          limit number of chunks to embed
 
 tag filtering (browse mode):
   --tags <t1,t2,...>   only show docs matching these tags
@@ -253,10 +257,12 @@ fn main() -> Result<()> {
 	let mut config_path: Option<PathBuf> = None;
 	let mut ollama_url = "http://localhost:11434".to_string();
 	let mut model_name = "mistral-nemo".to_string();
+	let mut embed_model = "nomic-embed-text".to_string();
 	let mut force = false;
 	let mut tags_include: Option<Vec<String>> = None;
 	let mut tags_exclude: Vec<String> = Vec::new();
 	let mut include_all = false;
+	let mut limit: Option<usize> = None;
 
 	let mut positional = Vec::new();
 	let mut index = 1;
@@ -278,8 +284,16 @@ fn main() -> Result<()> {
 				index += 1;
 				model_name = args[index].clone();
 			}
+			"--embed-model" => {
+				index += 1;
+				embed_model = args[index].clone();
+			}
 			"--force" => {
 				force = true;
+			}
+			"--limit" => {
+				index += 1;
+				limit = Some(args[index].parse().context("--limit requires a number")?);
 			}
 			"--tags" => {
 				index += 1;
@@ -359,10 +373,12 @@ fn main() -> Result<()> {
 			let documents = storage::document_count(&connection)?;
 			let entries = storage::entry_count(&connection)?;
 			let chunks = storage::chunk_count(&connection)?;
+			let embeddings = storage::count_chunks_with_embeddings(&connection)?;
 			println!("database: {}", db_path.display());
 			println!("documents: {}", documents);
 			println!("entries: {}", entries);
 			println!("chunks: {}", chunks);
+			println!("embeddings: {}/{}", embeddings, chunks);
 		}
 		Some("dump") => {
 			let query = positional[1..].join(" ");
@@ -387,6 +403,61 @@ fn main() -> Result<()> {
 					}
 					for line in entry.body.lines() {
 						println!("  {}", line);
+					}
+					println!();
+				}
+			}
+		}
+		Some("embed") => {
+			let ollama = OllamaClient::new(&ollama_url, &model_name);
+			let pending = storage::count_chunks_without_embeddings(&connection)?;
+			let existing = storage::count_chunks_with_embeddings(&connection)?;
+			println!("embeddings: {} existing, {} pending", existing, pending);
+
+			if pending == 0 {
+				println!("all chunks have embeddings");
+				return Ok(());
+			}
+
+			let chunks = storage::get_chunks_without_embeddings(&connection, limit)?;
+			let total = chunks.len();
+			println!("computing embeddings for {} chunks using {}...", total, embed_model);
+
+			for (i, chunk) in chunks.iter().enumerate() {
+				let embedding = ollama.embed(&chunk.body, &embed_model)?;
+				storage::insert_embedding(&connection, chunk.id, &embedding)?;
+				if (i + 1) % 10 == 0 || i + 1 == total {
+					eprint!("\r  {}/{}", i + 1, total);
+				}
+			}
+			eprintln!();
+			println!("done");
+		}
+		Some("similar") => {
+			let query = positional[1..].join(" ");
+			if query.is_empty() {
+				anyhow::bail!("similar requires a query");
+			}
+
+			let existing = storage::count_chunks_with_embeddings(&connection)?;
+			if existing == 0 {
+				anyhow::bail!("no embeddings yet - run 'cathedrals embed' first");
+			}
+
+			let ollama = OllamaClient::new(&ollama_url, &model_name);
+			let query_embedding = ollama.embed(&query, &embed_model)?;
+			let results = storage::find_similar_chunks(&connection, &query_embedding, 10)?;
+
+			if results.is_empty() {
+				println!("no results");
+			} else {
+				for result in &results {
+					println!("--- [{:.3}] {} | {} ---", result.similarity, result.source_title, &result.clip_date[..10.min(result.clip_date.len())]);
+					for line in result.body.lines().take(5) {
+						println!("  {}", line);
+					}
+					if result.body.lines().count() > 5 {
+						println!("  ...");
 					}
 					println!();
 				}

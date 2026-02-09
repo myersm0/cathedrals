@@ -88,6 +88,11 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		);
 
 		CREATE INDEX IF NOT EXISTS document_tags_tag ON document_tags(tag);
+
+		CREATE TABLE IF NOT EXISTS chunk_embeddings (
+			chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+			embedding BLOB NOT NULL
+		);
 		",
 	)?;
 	Ok(())
@@ -638,4 +643,151 @@ pub fn get_document_ids_by_tag(connection: &Connection, tag: &str) -> Result<Vec
 		.query_map(params![tag.trim().to_lowercase()], |row| row.get(0))?
 		.collect::<std::result::Result<Vec<i64>, _>>()?;
 	Ok(ids)
+}
+
+#[derive(Debug)]
+pub struct ChunkForEmbedding {
+	pub id: i64,
+	pub body: String,
+}
+
+pub fn get_chunks_without_embeddings(connection: &Connection, limit: Option<usize>) -> Result<Vec<ChunkForEmbedding>> {
+	let query = match limit {
+		Some(n) => format!(
+			"SELECT c.id, c.body FROM chunks c
+			 LEFT JOIN chunk_embeddings ce ON c.id = ce.chunk_id
+			 WHERE ce.chunk_id IS NULL
+			 LIMIT {}",
+			n
+		),
+		None => "SELECT c.id, c.body FROM chunks c
+		         LEFT JOIN chunk_embeddings ce ON c.id = ce.chunk_id
+		         WHERE ce.chunk_id IS NULL".to_string(),
+	};
+	let mut stmt = connection.prepare(&query)?;
+	let chunks = stmt
+		.query_map([], |row| {
+			Ok(ChunkForEmbedding {
+				id: row.get(0)?,
+				body: row.get(1)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(chunks)
+}
+
+pub fn count_chunks_without_embeddings(connection: &Connection) -> Result<i64> {
+	let count: i64 = connection.query_row(
+		"SELECT COUNT(*) FROM chunks c
+		 LEFT JOIN chunk_embeddings ce ON c.id = ce.chunk_id
+		 WHERE ce.chunk_id IS NULL",
+		[],
+		|row| row.get(0),
+	)?;
+	Ok(count)
+}
+
+pub fn count_chunks_with_embeddings(connection: &Connection) -> Result<i64> {
+	let count: i64 = connection.query_row(
+		"SELECT COUNT(*) FROM chunk_embeddings",
+		[],
+		|row| row.get(0),
+	)?;
+	Ok(count)
+}
+
+pub fn insert_embedding(connection: &Connection, chunk_id: i64, embedding: &[f32]) -> Result<()> {
+	let bytes: Vec<u8> = embedding.iter()
+		.flat_map(|f| f.to_le_bytes())
+		.collect();
+	connection.execute(
+		"INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding) VALUES (?1, ?2)",
+		params![chunk_id, bytes],
+	)?;
+	Ok(())
+}
+
+pub fn get_embedding(connection: &Connection, chunk_id: i64) -> Result<Option<Vec<f32>>> {
+	let result: Option<Vec<u8>> = connection
+		.query_row(
+			"SELECT embedding FROM chunk_embeddings WHERE chunk_id = ?1",
+			params![chunk_id],
+			|row| row.get(0),
+		)
+		.optional()?;
+
+	Ok(result.map(|bytes| {
+		bytes
+			.chunks_exact(4)
+			.map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+			.collect()
+	}))
+}
+
+#[derive(Debug)]
+pub struct SimilarChunk {
+	pub chunk_id: i64,
+	pub document_id: i64,
+	pub source_title: String,
+	pub clip_date: String,
+	pub body: String,
+	pub similarity: f32,
+}
+
+pub fn find_similar_chunks(
+	connection: &Connection,
+	query_embedding: &[f32],
+	limit: usize,
+) -> Result<Vec<SimilarChunk>> {
+	let mut stmt = connection.prepare(
+		"SELECT ce.chunk_id, ce.embedding, c.body, e.document_id, e.source_title, e.clip_date
+		 FROM chunk_embeddings ce
+		 JOIN chunks c ON c.id = ce.chunk_id
+		 JOIN entries e ON e.id = c.entry_id"
+	)?;
+
+	let mut results: Vec<SimilarChunk> = stmt
+		.query_map([], |row| {
+			let chunk_id: i64 = row.get(0)?;
+			let embedding_bytes: Vec<u8> = row.get(1)?;
+			let body: String = row.get(2)?;
+			let document_id: i64 = row.get(3)?;
+			let source_title: String = row.get(4)?;
+			let clip_date: String = row.get(5)?;
+
+			let embedding: Vec<f32> = embedding_bytes
+				.chunks_exact(4)
+				.map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+				.collect();
+
+			let similarity = cosine_similarity(query_embedding, &embedding);
+
+			Ok(SimilarChunk {
+				chunk_id,
+				document_id,
+				source_title,
+				clip_date,
+				body,
+				similarity,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+
+	results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+	results.truncate(limit);
+	Ok(results)
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+	if a.len() != b.len() || a.is_empty() {
+		return 0.0;
+	}
+	let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+	let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+	let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+	if mag_a == 0.0 || mag_b == 0.0 {
+		0.0
+	} else {
+		dot / (mag_a * mag_b)
+	}
 }
