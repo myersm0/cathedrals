@@ -275,17 +275,26 @@ pub fn load_or_default(path: Option<&Path>) -> Result<Config> {
 	}
 }
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+#[derive(Debug, Deserialize, Default)]
+struct DefaultsToml {
+	#[serde(default)]
+	exclude: Vec<String>,
+}
 
 #[derive(Debug, Deserialize, Default)]
 struct TagConfigToml {
 	#[serde(default)]
-	implications: HashMap<String, Vec<String>>,
+	includes: HashMap<String, Vec<String>>,
+	#[serde(default)]
+	defaults: DefaultsToml,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct TagConfig {
-	pub implications: HashMap<String, Vec<String>>,
+	pub includes: HashMap<String, Vec<String>>,
+	pub default_exclude: Vec<String>,
 }
 
 impl TagConfig {
@@ -295,43 +304,19 @@ impl TagConfig {
 		let toml: TagConfigToml = toml::from_str(&contents)
 			.with_context(|| format!("failed to parse tag config: {}", path.display()))?;
 		Ok(TagConfig {
-			implications: toml.implications,
+			includes: toml.includes,
+			default_exclude: toml.defaults.exclude,
 		})
-	}
-
-	pub fn tags_implying(&self, target: &str) -> HashSet<String> {
-		let mut result = HashSet::new();
-		let mut changed = true;
-
-		for (tag, implied) in &self.implications {
-			if implied.iter().any(|t| t == target) {
-				result.insert(tag.clone());
-			}
-		}
-
-		while changed {
-			changed = false;
-			let current: Vec<String> = result.iter().cloned().collect();
-			for tag_in_result in current {
-				for (tag, implied) in &self.implications {
-					if implied.iter().any(|t| t == &tag_in_result) && !result.contains(tag) {
-						result.insert(tag.clone());
-						changed = true;
-					}
-				}
-			}
-		}
-
-		result
 	}
 
 	pub fn doc_matches_filter(&self, doc_tags: &[String], filter_tag: &str) -> bool {
 		if doc_tags.iter().any(|t| t == filter_tag) {
 			return true;
 		}
-
-		let implying_tags = self.tags_implying(filter_tag);
-		doc_tags.iter().any(|t| implying_tags.contains(t))
+		if let Some(included) = self.includes.get(filter_tag) {
+			return doc_tags.iter().any(|t| included.contains(t));
+		}
+		false
 	}
 }
 

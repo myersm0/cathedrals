@@ -56,6 +56,8 @@ struct App {
 	tag_filter: Option<String>,
 	tag_filter_index: usize,
 	tag_config: TagConfig,
+	global_include: Option<Vec<String>>,
+	global_exclude: Vec<String>,
 }
 
 impl App {
@@ -88,6 +90,8 @@ impl App {
 			tag_filter: None,
 			tag_filter_index: 0,
 			tag_config: TagConfig::default(),
+			global_include: None,
+			global_exclude: Vec::new(),
 		}
 	}
 
@@ -169,7 +173,17 @@ impl App {
 			self.total_search_chunks = 0;
 			return Ok(());
 		}
-		self.search_results = storage::search(connection, &self.search_query, self.search_sort_column)?;
+		let all_results = storage::search(connection, &self.search_query, self.search_sort_column)?;
+
+		let allowed_doc_ids: std::collections::HashSet<i64> = self.documents.iter()
+			.filter(|d| self.passes_global_filter(d))
+			.map(|d| d.id)
+			.collect();
+
+		self.search_results = all_results.into_iter()
+			.filter(|r| allowed_doc_ids.contains(&r.document_id))
+			.collect();
+
 		self.total_search_chunks = self.search_results.iter().map(|r| r.chunks.len()).sum();
 		self.search_chunk_index = 0;
 		Ok(())
@@ -358,17 +372,41 @@ impl App {
 		self.tag_filter_index = 0;
 	}
 
-	fn filtered_documents(&self) -> Vec<&DocumentSummary> {
-		match &self.tag_filter {
-			Some(tag) => self.documents.iter()
-				.filter(|d| self.tag_config.doc_matches_filter(&d.tags, tag))
-				.collect(),
-			None => self.documents.iter().collect(),
+	fn passes_global_filter(&self, doc: &DocumentSummary) -> bool {
+		if let Some(ref includes) = self.global_include {
+			if !includes.iter().any(|t| self.tag_config.doc_matches_filter(&doc.tags, t)) {
+				return false;
+			}
 		}
+		for exclude in &self.global_exclude {
+			if self.tag_config.doc_matches_filter(&doc.tags, exclude) {
+				return false;
+			}
+		}
+		true
+	}
+
+	fn filtered_documents(&self) -> Vec<&DocumentSummary> {
+		self.documents.iter()
+			.filter(|d| self.passes_global_filter(d))
+			.filter(|d| {
+				match &self.tag_filter {
+					Some(tag) => self.tag_config.doc_matches_filter(&d.tags, tag),
+					None => true,
+				}
+			})
+			.collect()
 	}
 }
 
-pub fn run(connection: &Connection) -> Result<()> {
+#[derive(Debug, Clone, Default)]
+pub struct GlobalFilter {
+	pub include: Option<Vec<String>>,
+	pub exclude: Vec<String>,
+	pub include_all: bool,
+}
+
+pub fn run(connection: &Connection, filter: GlobalFilter) -> Result<()> {
 	enable_raw_mode()?;
 	let mut stdout = io::stdout();
 	execute!(stdout, EnterAlternateScreen)?;
@@ -378,6 +416,16 @@ pub fn run(connection: &Connection) -> Result<()> {
 
 	let mut app = App::new();
 	app.tag_config = crate::config::load_tag_config(None);
+
+	app.global_include = filter.include;
+	app.global_exclude = if filter.include_all {
+		Vec::new()
+	} else if filter.exclude.is_empty() {
+		app.tag_config.default_exclude.clone()
+	} else {
+		filter.exclude
+	};
+
 	app.load_documents(connection)?;
 	app.load_all_tags(connection)?;
 
@@ -671,9 +719,20 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 	]);
 
 	let filtered = app.filtered_documents();
-	let title = match &app.tag_filter {
-		Some(tag) => format!(" BROWSE ({}/{} docs, filter: {}) ", filtered.len(), app.documents.len(), tag),
-		None => format!(" BROWSE ({} documents) ", app.documents.len()),
+	let total_after_global = app.documents.iter()
+		.filter(|d| app.passes_global_filter(d))
+		.count();
+
+	let title = if app.global_include.is_some() || !app.global_exclude.is_empty() {
+		match &app.tag_filter {
+			Some(tag) => format!(" BROWSE ({}/{} docs, filter: {}) [restricted] ", filtered.len(), total_after_global, tag),
+			None => format!(" BROWSE ({}/{} docs) [restricted] ", filtered.len(), app.documents.len()),
+		}
+	} else {
+		match &app.tag_filter {
+			Some(tag) => format!(" BROWSE ({}/{} docs, filter: {}) ", filtered.len(), total_after_global, tag),
+			None => format!(" BROWSE ({} documents) ", filtered.len()),
+		}
 	};
 
 	let header_para = Paragraph::new(header)

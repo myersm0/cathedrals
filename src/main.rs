@@ -237,7 +237,12 @@ options:
   --config <path>      config file (default: $XDG_CONFIG_HOME/cathedrals/config.toml)
   --ollama <url>       ollama endpoint (default: http://localhost:11434)
   --model <n>          ollama model (default: mistral-nemo)
-  --force              re-ingest files even if already in database"
+  --force              re-ingest files even if already in database
+
+tag filtering (browse mode):
+  --tags <t1,t2,...>   only show docs matching these tags
+  --exclude <t1,...>   exclude docs matching these tags (overrides config default)
+  --include-all        ignore default exclusions, show everything"
 	);
 }
 
@@ -249,6 +254,9 @@ fn main() -> Result<()> {
 	let mut ollama_url = "http://localhost:11434".to_string();
 	let mut model_name = "mistral-nemo".to_string();
 	let mut force = false;
+	let mut tags_include: Option<Vec<String>> = None;
+	let mut tags_exclude: Vec<String> = Vec::new();
+	let mut include_all = false;
 
 	let mut positional = Vec::new();
 	let mut index = 1;
@@ -272,6 +280,19 @@ fn main() -> Result<()> {
 			}
 			"--force" => {
 				force = true;
+			}
+			"--tags" => {
+				index += 1;
+				tags_include = Some(
+					args[index].split(',').map(|s| s.trim().to_lowercase()).collect()
+				);
+			}
+			"--exclude" => {
+				index += 1;
+				tags_exclude = args[index].split(',').map(|s| s.trim().to_lowercase()).collect();
+			}
+			"--include-all" => {
+				include_all = true;
 			}
 			"--help" | "-h" => {
 				print_usage();
@@ -372,7 +393,12 @@ fn main() -> Result<()> {
 			}
 		}
 		Some("browse") | None => {
-			tui::run(&connection)?;
+			let filter = tui::GlobalFilter {
+				include: tags_include,
+				exclude: tags_exclude,
+				include_all,
+			};
+			tui::run(&connection, filter)?;
 		}
 		_ => {
 			print_usage();

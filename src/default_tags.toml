@@ -1,20 +1,24 @@
-# Tag implications for cathedrals
+# Tag configuration for cathedrals
 # Place this file at the same location as the database:
 #   macOS: ~/Library/Application Support/cathedrals/tags.toml
 #   Linux: ~/.local/share/cathedrals/tags.toml
-#
-# When you filter by a tag, documents tagged with any tag that
-# implies it (directly or transitively) will also be shown.
+
+# Default exclusions - these tags are filtered out unless you use --include-all
+# or explicitly include them with --tags
+[defaults]
+exclude = ["junk", "archived"]
+
+# Parent tags can include child tags. When you filter by a parent,
+# documents tagged with any of its children will also be shown.
+# This is one-directional: filtering by a child does NOT show parent.
 #
 # Example:
-# [implications]
-# project-maupassant = ["comp-ling", "translation", "french"]
-# project-cathedrals = ["rust", "tui", "personal-tools"]
-# comp-ling = ["linguistics"]
-# work = ["professional"]
+# [includes]
+# project-maupassant = ["maupassant-parser", "maupassant-corpus", "maupassant-eval"]
+# music = ["piano", "guitar", "drums"]
 #
 # With this config:
-# - Filtering by "comp-ling" finds docs tagged "comp-ling" OR "project-maupassant"
-# - Filtering by "linguistics" finds docs tagged "linguistics", "comp-ling", or "project-maupassant"
+# - Filtering by "project-maupassant" finds docs tagged with it OR any sub-project
+# - Filtering by "maupassant-parser" finds only docs tagged "maupassant-parser"
 
-[implications]
+[includes]
