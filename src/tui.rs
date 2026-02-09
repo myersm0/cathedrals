@@ -25,6 +25,8 @@ enum Mode {
 	Browse,
 	Read,
 	Search,
+	TagEdit,
+	TagFilter,
 }
 
 struct App {
@@ -47,6 +49,11 @@ struct App {
 	status_message: Option<String>,
 	group_docs: Vec<i64>,
 	group_index: usize,
+	current_doc_tags: Vec<String>,
+	tag_input: String,
+	all_tags: Vec<(String, i64)>,
+	tag_filter: Option<String>,
+	tag_filter_index: usize,
 }
 
 impl App {
@@ -73,6 +80,11 @@ impl App {
 			status_message: None,
 			group_docs: Vec::new(),
 			group_index: 0,
+			current_doc_tags: Vec::new(),
+			tag_input: String::new(),
+			all_tags: Vec::new(),
+			tag_filter: None,
+			tag_filter_index: 0,
 		}
 	}
 
@@ -88,7 +100,8 @@ impl App {
 
 	fn open_selected_document(&mut self, connection: &Connection) -> Result<()> {
 		if let Some(selected) = self.browse_state.selected() {
-			if let Some(doc) = self.documents.get(selected) {
+			let filtered = self.filtered_documents();
+			if let Some(doc) = filtered.get(selected) {
 				self.open_document_by_id(connection, doc.id)?;
 			}
 		}
@@ -97,6 +110,7 @@ impl App {
 
 	fn open_document_by_id(&mut self, connection: &Connection, doc_id: i64) -> Result<()> {
 		self.current_document = storage::get_document(connection, doc_id)?;
+		self.current_doc_tags = storage::get_tags_for_document(connection, doc_id)?;
 		self.scroll_offset = 0;
 		self.current_chunk_index = 0;
 		self.total_chunks = self.current_document.as_ref()
@@ -136,6 +150,7 @@ impl App {
 		if let Some(&doc_id) = self.group_docs.get(new_index) {
 			self.group_index = new_index;
 			self.current_document = storage::get_document(connection, doc_id)?;
+			self.current_doc_tags = storage::get_tags_for_document(connection, doc_id)?;
 			self.scroll_offset = 0;
 			self.current_chunk_index = 0;
 			self.total_chunks = self.current_document.as_ref()
@@ -286,6 +301,68 @@ impl App {
 			SortDirection::Descending => SortDirection::Ascending,
 		};
 	}
+
+	fn load_all_tags(&mut self, connection: &Connection) -> Result<()> {
+		self.all_tags = storage::list_all_tags(connection)?;
+		Ok(())
+	}
+
+	fn add_current_tag(&mut self, connection: &Connection) -> Result<()> {
+		let input = self.tag_input.trim().to_lowercase();
+		if input.is_empty() {
+			return Ok(());
+		}
+
+		if let Some(ref doc) = self.current_document {
+			if let Ok(idx) = input.parse::<usize>() {
+				if idx > 0 && idx <= self.current_doc_tags.len() {
+					let tag = self.current_doc_tags[idx - 1].clone();
+					storage::remove_tag(connection, doc.id, &tag)?;
+					self.current_doc_tags.remove(idx - 1);
+					self.tag_input.clear();
+					self.load_documents(connection)?;
+					self.status_message = Some(format!("Removed tag: {}", tag));
+					return Ok(());
+				}
+			}
+
+			if !self.current_doc_tags.contains(&input) {
+				storage::add_tag(connection, doc.id, &input)?;
+				self.current_doc_tags.push(input.clone());
+				self.current_doc_tags.sort();
+				self.status_message = Some(format!("Added tag: {}", input));
+			}
+			self.tag_input.clear();
+			self.load_documents(connection)?;
+		}
+		Ok(())
+	}
+
+	fn remove_tag_at_cursor(&mut self, _connection: &Connection) -> Result<()> {
+		Ok(())
+	}
+
+	fn apply_tag_filter(&mut self) {
+		if self.all_tags.is_empty() {
+			self.tag_filter = None;
+		} else if self.tag_filter_index < self.all_tags.len() {
+			self.tag_filter = Some(self.all_tags[self.tag_filter_index].0.clone());
+		}
+	}
+
+	fn clear_tag_filter(&mut self) {
+		self.tag_filter = None;
+		self.tag_filter_index = 0;
+	}
+
+	fn filtered_documents(&self) -> Vec<&DocumentSummary> {
+		match &self.tag_filter {
+			Some(tag) => self.documents.iter()
+				.filter(|d| d.tags.contains(tag))
+				.collect(),
+			None => self.documents.iter().collect(),
+		}
+	}
 }
 
 pub fn run(connection: &Connection) -> Result<()> {
@@ -298,6 +375,7 @@ pub fn run(connection: &Connection) -> Result<()> {
 
 	let mut app = App::new();
 	app.load_documents(connection)?;
+	app.load_all_tags(connection)?;
 
 	let result = run_app(&mut terminal, &mut app, connection);
 
@@ -334,8 +412,9 @@ fn run_app(
 						}
 					}
 					KeyCode::Down => {
+						let max_idx = app.filtered_documents().len().saturating_sub(1);
 						if let Some(selected) = app.browse_state.selected() {
-							if selected < app.documents.len().saturating_sub(1) {
+							if selected < max_idx {
 								app.browse_state.select(Some(selected + 1));
 							}
 						}
@@ -355,6 +434,20 @@ fn run_app(
 					KeyCode::Char('S') => {
 						app.toggle_sort_direction();
 						app.load_documents(connection)?;
+					}
+					KeyCode::Char('f') => {
+						app.load_all_tags(connection)?;
+						if !app.all_tags.is_empty() {
+							app.tag_filter_index = 0;
+							app.mode = Mode::TagFilter;
+						} else {
+							app.status_message = Some("No tags defined".to_string());
+						}
+					}
+					KeyCode::Char('F') => {
+						app.clear_tag_filter();
+						app.browse_state.select(Some(0));
+						app.status_message = Some("Filter cleared".to_string());
 					}
 					_ => {}
 				},
@@ -395,6 +488,10 @@ fn run_app(
 					KeyCode::Right => {
 						app.navigate_group(connection, 1)?;
 					}
+					KeyCode::Char('t') => {
+						app.tag_input.clear();
+						app.mode = Mode::TagEdit;
+					}
 					_ => {}
 				},
 				Mode::Search => match key.code {
@@ -429,6 +526,50 @@ fn run_app(
 					}
 					_ => {}
 				},
+				Mode::TagEdit => match key.code {
+					KeyCode::Esc => {
+						app.mode = Mode::Read;
+						app.tag_input.clear();
+					}
+					KeyCode::Enter => {
+						app.add_current_tag(connection)?;
+						app.load_all_tags(connection)?;
+					}
+					KeyCode::Backspace => {
+						app.tag_input.pop();
+					}
+					KeyCode::Char(c) => {
+						app.tag_input.push(c);
+					}
+					_ => {}
+				},
+				Mode::TagFilter => match key.code {
+					KeyCode::Esc => {
+						app.mode = Mode::Browse;
+					}
+					KeyCode::Enter => {
+						app.apply_tag_filter();
+						app.browse_state.select(Some(0));
+						app.mode = Mode::Browse;
+					}
+					KeyCode::Up => {
+						if app.tag_filter_index > 0 {
+							app.tag_filter_index -= 1;
+						}
+					}
+					KeyCode::Down => {
+						if app.tag_filter_index + 1 < app.all_tags.len() {
+							app.tag_filter_index += 1;
+						}
+					}
+					KeyCode::Char('c') => {
+						app.clear_tag_filter();
+						app.browse_state.select(Some(0));
+						app.mode = Mode::Browse;
+						app.status_message = Some("Filter cleared".to_string());
+					}
+					_ => {}
+				},
 			}
 		}
 
@@ -450,9 +591,17 @@ fn draw(frame: &mut Frame, app: &App) {
 		.split(frame.area());
 
 	match app.mode {
-		Mode::Browse => draw_browse(frame, app, chunks[0]),
-		Mode::Read => draw_read(frame, app, chunks[0]),
+		Mode::Browse | Mode::TagFilter => draw_browse(frame, app, chunks[0]),
+		Mode::Read | Mode::TagEdit => draw_read(frame, app, chunks[0]),
 		Mode::Search => draw_search(frame, app, chunks[0]),
+	}
+
+	if app.mode == Mode::TagFilter {
+		draw_tag_filter_popup(frame, app);
+	}
+
+	if app.mode == Mode::TagEdit {
+		draw_tag_edit_popup(frame, app);
 	}
 
 	draw_status_bar(frame, app, chunks[1]);
@@ -493,28 +642,43 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		),
 		Span::raw("│ "),
 		Span::styled(
-			"Preview",
+			"Tags / Preview",
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 	]);
 
+	let filtered = app.filtered_documents();
+	let title = match &app.tag_filter {
+		Some(tag) => format!(" BROWSE ({}/{} docs, filter: {}) ", filtered.len(), app.documents.len(), tag),
+		None => format!(" BROWSE ({} documents) ", app.documents.len()),
+	};
+
 	let header_para = Paragraph::new(header)
 		.block(Block::default()
-			.title(format!(" BROWSE ({} documents) ", app.documents.len()))
+			.title(title)
 			.borders(Borders::TOP | Borders::LEFT | Borders::RIGHT));
 	frame.render_widget(header_para, chunks[0]);
 
-	let items: Vec<ListItem> = app
-		.documents
+	let items: Vec<ListItem> = filtered
 		.iter()
 		.map(|doc| {
 			let source = truncate_str(&doc.source_title, 43);
 			let doctype = doc.doctype_name.as_deref().unwrap_or("-");
 			let date = &doc.clip_date[..10.min(doc.clip_date.len())];
+
+			let tags_str = if doc.tags.is_empty() {
+				String::new()
+			} else {
+				format!("[{}] ", doc.tags.join(", "))
+			};
+
 			let first_line = doc.first_line.as_deref()
 				.map(|s| s.lines().next().unwrap_or(""))
 				.map(|s| s.trim())
-				.unwrap_or("-");
+				.unwrap_or("");
+
+			let preview = format!("{}{}", tags_str, first_line);
+
 			ListItem::new(Line::from(vec![
 				Span::raw(format!("{:<45}", source)),
 				Span::raw("│ "),
@@ -522,10 +686,17 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 				Span::raw("│ "),
 				Span::raw(format!("{:<12}", date)),
 				Span::raw("│ "),
-				Span::styled(
-					truncate_str(first_line, 50).to_string(),
-					Style::default().fg(Color::DarkGray),
-				),
+				if !doc.tags.is_empty() {
+					Span::styled(
+						truncate_str(&preview, 50).to_string(),
+						Style::default().fg(Color::Cyan),
+					)
+				} else {
+					Span::styled(
+						truncate_str(&preview, 50).to_string(),
+						Style::default().fg(Color::DarkGray),
+					)
+				},
 			]))
 		})
 		.collect();
@@ -625,6 +796,12 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		String::new()
 	};
 
+	let tags_info = if app.current_doc_tags.is_empty() {
+		String::new()
+	} else {
+		format!(" [{}]", app.current_doc_tags.join(", "))
+	};
+
 	let display_title = if app.group_docs.len() > 1 {
 		extract_group_key(&doc.source_title)
 			.unwrap_or_else(|| doc.title.clone().unwrap_or_else(|| doc.source_title.clone()))
@@ -638,11 +815,12 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		.block(
 			Block::default()
 				.title(format!(
-					" {} | {} | chunk {}/{}{}",
-					truncate_str(&display_title, 40),
+					" {} | {} | chunk {}/{}{}{}",
+					truncate_str(&display_title, 35),
 					date_str,
 					app.current_chunk_index + 1,
 					app.total_chunks.max(1),
+					tags_info,
 					group_info,
 				))
 				.borders(Borders::ALL),
@@ -744,15 +922,17 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let read_help = if app.group_docs.len() > 1 {
-		"[↑↓] chunk  [◀▶] group  [y/Y] yank/all  [b] back  [q] quit"
+		"[↑↓] chunk  [◀▶] group  [y/Y] yank/all  [t] tags  [b] back  [q] quit"
 	} else {
-		"[↑↓] chunk  [PgUp/Dn] jump  [y/Y] yank/all  [b] back  [/] search  [q] quit"
+		"[↑↓] chunk  [PgUp/Dn] jump  [y/Y] yank/all  [t] tags  [b] back  [q] quit"
 	};
 
 	let help_text = match app.mode {
-		Mode::Browse => "[↑↓] move  [Enter] open  [/] search  [s] sort  [S] direction  [q] quit",
+		Mode::Browse => "[↑↓] move  [Enter] open  [/] search  [f] filter  [F] clear  [s] sort  [q] quit",
 		Mode::Read => read_help,
 		Mode::Search => "[↑↓] chunk  [Enter] open  [Tab] sort  [Esc] back",
+		Mode::TagEdit => "[type] add tag  [Enter] save  [Esc] cancel",
+		Mode::TagFilter => "[↑↓] select  [Enter] apply  [c] clear  [Esc] cancel",
 	};
 
 	let status = if let Some(ref msg) = app.status_message {
@@ -768,6 +948,84 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let paragraph = Paragraph::new(status)
 		.style(Style::default().bg(Color::DarkGray));
 	frame.render_widget(paragraph, area);
+}
+
+fn draw_tag_edit_popup(frame: &mut Frame, app: &App) {
+	let area = centered_rect(50, 12, frame.area());
+	frame.render_widget(Clear, area);
+
+	let mut lines: Vec<Line> = vec![
+		Line::from("Current tags:"),
+		Line::from(""),
+	];
+
+	if app.current_doc_tags.is_empty() {
+		lines.push(Line::from(Span::styled("  (none)", Style::default().fg(Color::DarkGray))));
+	} else {
+		for (i, tag) in app.current_doc_tags.iter().enumerate() {
+			lines.push(Line::from(format!("  {}. {}", i + 1, tag)));
+		}
+	}
+
+	lines.push(Line::from(""));
+	lines.push(Line::from("Type tag name to add, or # to remove:"));
+	lines.push(Line::from(format!("> {}_", app.tag_input)));
+
+	let popup = Paragraph::new(Text::from(lines))
+		.block(
+			Block::default()
+				.title(" Edit Tags ")
+				.borders(Borders::ALL)
+				.border_style(Style::default().fg(Color::Cyan)),
+		);
+
+	frame.render_widget(popup, area);
+}
+
+fn draw_tag_filter_popup(frame: &mut Frame, app: &App) {
+	let height = (app.all_tags.len() + 4).min(15) as u16;
+	let area = centered_rect(40, height, frame.area());
+	frame.render_widget(Clear, area);
+
+	let mut lines: Vec<Line> = vec![
+		Line::from("Select tag to filter by:"),
+		Line::from(""),
+	];
+
+	for (i, (tag, count)) in app.all_tags.iter().enumerate() {
+		let style = if i == app.tag_filter_index {
+			Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+		} else {
+			Style::default()
+		};
+		let marker = if i == app.tag_filter_index { "> " } else { "  " };
+		lines.push(Line::from(Span::styled(
+			format!("{}{} ({})", marker, tag, count),
+			style,
+		)));
+	}
+
+	let popup = Paragraph::new(Text::from(lines))
+		.block(
+			Block::default()
+				.title(" Filter by Tag ")
+				.borders(Borders::ALL)
+				.border_style(Style::default().fg(Color::Cyan)),
+		);
+
+	frame.render_widget(popup, area);
+}
+
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+	let popup_width = area.width * percent_x / 100;
+	let x = (area.width.saturating_sub(popup_width)) / 2;
+	let y = (area.height.saturating_sub(height)) / 2;
+	Rect::new(
+		area.x + x,
+		area.y + y,
+		popup_width.min(area.width),
+		height.min(area.height),
+	)
 }
 
 fn truncate_str(s: &str, max_len: usize) -> &str {

@@ -80,6 +80,14 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			INSERT INTO chunks_fts(rowid, body)
 			VALUES (new.id, new.body);
 		END;
+
+		CREATE TABLE IF NOT EXISTS document_tags (
+			document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+			tag TEXT NOT NULL,
+			PRIMARY KEY (document_id, tag)
+		);
+
+		CREATE INDEX IF NOT EXISTS document_tags_tag ON document_tags(tag);
 		",
 	)?;
 	Ok(())
@@ -425,6 +433,7 @@ pub struct DocumentSummary {
 	pub entry_count: i64,
 	pub chunk_count: i64,
 	pub first_line: Option<String>,
+	pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,7 +467,8 @@ pub fn list_documents(
 		"SELECT d.id, d.title, d.source_title, d.doctype_name, d.clip_date,
 		        COUNT(DISTINCT e.id) as entry_count,
 		        COUNT(c.id) as chunk_count,
-		        (SELECT SUBSTR(body, 1, 100) FROM entries WHERE document_id = d.id AND LENGTH(TRIM(body)) > 0 ORDER BY position LIMIT 1) as first_line
+		        (SELECT SUBSTR(body, 1, 100) FROM entries WHERE document_id = d.id AND LENGTH(TRIM(body)) > 0 ORDER BY position LIMIT 1) as first_line,
+		        (SELECT GROUP_CONCAT(tag, ',') FROM document_tags WHERE document_id = d.id) as tags
 		 FROM documents d
 		 LEFT JOIN entries e ON e.document_id = d.id
 		 LEFT JOIN chunks c ON c.entry_id = e.id
@@ -469,6 +479,10 @@ pub fn list_documents(
 	let mut statement = connection.prepare(&query)?;
 	let results = statement
 		.query_map([], |row| {
+			let tags_str: Option<String> = row.get(8)?;
+			let tags = tags_str
+				.map(|s| s.split(',').map(|t| t.to_string()).collect())
+				.unwrap_or_default();
 			Ok(DocumentSummary {
 				id: row.get(0)?,
 				title: row.get(1)?,
@@ -478,6 +492,7 @@ pub fn list_documents(
 				entry_count: row.get(5)?,
 				chunk_count: row.get(6)?,
 				first_line: row.get(7)?,
+				tags,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -581,4 +596,46 @@ pub fn get_document(connection: &Connection, document_id: i64) -> Result<Option<
 		clip_date,
 		entries,
 	}))
+}
+
+pub fn add_tag(connection: &Connection, document_id: i64, tag: &str) -> Result<()> {
+	connection.execute(
+		"INSERT OR IGNORE INTO document_tags (document_id, tag) VALUES (?1, ?2)",
+		params![document_id, tag.trim().to_lowercase()],
+	)?;
+	Ok(())
+}
+
+pub fn remove_tag(connection: &Connection, document_id: i64, tag: &str) -> Result<()> {
+	connection.execute(
+		"DELETE FROM document_tags WHERE document_id = ?1 AND tag = ?2",
+		params![document_id, tag.trim().to_lowercase()],
+	)?;
+	Ok(())
+}
+
+pub fn get_tags_for_document(connection: &Connection, document_id: i64) -> Result<Vec<String>> {
+	let mut stmt = connection.prepare("SELECT tag FROM document_tags WHERE document_id = ?1 ORDER BY tag")?;
+	let tags = stmt
+		.query_map(params![document_id], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<String>, _>>()?;
+	Ok(tags)
+}
+
+pub fn list_all_tags(connection: &Connection) -> Result<Vec<(String, i64)>> {
+	let mut stmt = connection.prepare(
+		"SELECT tag, COUNT(*) as count FROM document_tags GROUP BY tag ORDER BY tag"
+	)?;
+	let tags = stmt
+		.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+		.collect::<std::result::Result<Vec<(String, i64)>, _>>()?;
+	Ok(tags)
+}
+
+pub fn get_document_ids_by_tag(connection: &Connection, tag: &str) -> Result<Vec<i64>> {
+	let mut stmt = connection.prepare("SELECT document_id FROM document_tags WHERE tag = ?1")?;
+	let ids = stmt
+		.query_map(params![tag.trim().to_lowercase()], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<i64>, _>>()?;
+	Ok(ids)
 }
