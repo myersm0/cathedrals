@@ -308,7 +308,7 @@ impl App {
 	}
 
 	fn add_current_tag(&mut self, connection: &Connection) -> Result<()> {
-		let input = self.tag_input.trim().to_lowercase();
+		let input = self.tag_input.trim().to_lowercase().replace(' ', "-");
 		if input.is_empty() {
 			return Ok(());
 		}
@@ -987,7 +987,8 @@ fn draw_tag_edit_popup(frame: &mut Frame, app: &App) {
 	}
 
 	lines.push(Line::from(""));
-	lines.push(Line::from("Type tag name to add, or # to remove:"));
+	lines.push(Line::from("Type tag name + Enter to add"));
+	lines.push(Line::from("Type number + Enter to remove"));
 	lines.push(Line::from(format!("> {}_", app.tag_input)));
 
 	let popup = Paragraph::new(Text::from(lines))
