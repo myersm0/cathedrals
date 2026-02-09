@@ -33,10 +33,10 @@ fn normalize_to_ascii(s: &str) -> String {
 				c
 			} else {
 				match c {
-					'—' | '–' => '-',
-					'\'' | '\'' => '\'',
-					'"' | '"' => '"',
-					'…' => '.',
+					'\u{2014}' | '\u{2013}' => '-',  // em-dash, en-dash
+					'\u{2018}' | '\u{2019}' => '\'', // curly single quotes
+					'\u{201C}' | '\u{201D}' => '"',  // curly double quotes
+					'\u{2026}' => '.',               // ellipsis
 					_ => ' ',
 				}
 			}

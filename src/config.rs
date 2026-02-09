@@ -336,7 +336,7 @@ impl TagConfig {
 }
 
 fn default_tags_config_path() -> PathBuf {
-	dirs::config_dir()
+	dirs::data_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
 		.join("cathedrals")
 		.join("tags.toml")
