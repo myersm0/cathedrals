@@ -1,0 +1,20 @@
+# Tag implications for cathedrals
+# Place this file at the same location as the database:
+#   macOS: ~/Library/Application Support/cathedrals/tags.toml
+#   Linux: ~/.local/share/cathedrals/tags.toml
+#
+# When you filter by a tag, documents tagged with any tag that
+# implies it (directly or transitively) will also be shown.
+#
+# Example:
+# [implications]
+# project-maupassant = ["comp-ling", "translation", "french"]
+# project-cathedrals = ["rust", "tui", "personal-tools"]
+# comp-ling = ["linguistics"]
+# work = ["professional"]
+#
+# With this config:
+# - Filtering by "comp-ling" finds docs tagged "comp-ling" OR "project-maupassant"
+# - Filtering by "linguistics" finds docs tagged "linguistics", "comp-ling", or "project-maupassant"
+
+[implications]
