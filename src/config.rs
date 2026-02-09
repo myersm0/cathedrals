@@ -274,3 +274,79 @@ pub fn load_or_default(path: Option<&Path>) -> Result<Config> {
 		}
 	}
 }
+
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Deserialize, Default)]
+struct TagConfigToml {
+	#[serde(default)]
+	implications: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TagConfig {
+	pub implications: HashMap<String, Vec<String>>,
+}
+
+impl TagConfig {
+	pub fn load(path: &Path) -> Result<Self> {
+		let contents = std::fs::read_to_string(path)
+			.with_context(|| format!("failed to read tag config: {}", path.display()))?;
+		let toml: TagConfigToml = toml::from_str(&contents)
+			.with_context(|| format!("failed to parse tag config: {}", path.display()))?;
+		Ok(TagConfig {
+			implications: toml.implications,
+		})
+	}
+
+	pub fn tags_implying(&self, target: &str) -> HashSet<String> {
+		let mut result = HashSet::new();
+		let mut changed = true;
+
+		for (tag, implied) in &self.implications {
+			if implied.iter().any(|t| t == target) {
+				result.insert(tag.clone());
+			}
+		}
+
+		while changed {
+			changed = false;
+			let current: Vec<String> = result.iter().cloned().collect();
+			for tag_in_result in current {
+				for (tag, implied) in &self.implications {
+					if implied.iter().any(|t| t == &tag_in_result) && !result.contains(tag) {
+						result.insert(tag.clone());
+						changed = true;
+					}
+				}
+			}
+		}
+
+		result
+	}
+
+	pub fn doc_matches_filter(&self, doc_tags: &[String], filter_tag: &str) -> bool {
+		if doc_tags.iter().any(|t| t == filter_tag) {
+			return true;
+		}
+
+		let implying_tags = self.tags_implying(filter_tag);
+		doc_tags.iter().any(|t| implying_tags.contains(t))
+	}
+}
+
+fn default_tags_config_path() -> PathBuf {
+	dirs::config_dir()
+		.unwrap_or_else(|| PathBuf::from("."))
+		.join("cathedrals")
+		.join("tags.toml")
+}
+
+pub fn load_tag_config(path: Option<&Path>) -> TagConfig {
+	let path = path.map(PathBuf::from).unwrap_or_else(default_tags_config_path);
+	if path.exists() {
+		TagConfig::load(&path).unwrap_or_default()
+	} else {
+		TagConfig::default()
+	}
+}

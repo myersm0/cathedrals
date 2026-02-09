@@ -15,6 +15,7 @@ use ratatui::{
 use rusqlite::Connection;
 use std::io;
 
+use crate::config::TagConfig;
 use crate::storage::{
 	self, DocumentContent, DocumentSummary,
 	GroupedSearchResult, SearchSortColumn, SortColumn, SortDirection,
@@ -54,6 +55,7 @@ struct App {
 	all_tags: Vec<(String, i64)>,
 	tag_filter: Option<String>,
 	tag_filter_index: usize,
+	tag_config: TagConfig,
 }
 
 impl App {
@@ -85,6 +87,7 @@ impl App {
 			all_tags: Vec::new(),
 			tag_filter: None,
 			tag_filter_index: 0,
+			tag_config: TagConfig::default(),
 		}
 	}
 
@@ -358,7 +361,7 @@ impl App {
 	fn filtered_documents(&self) -> Vec<&DocumentSummary> {
 		match &self.tag_filter {
 			Some(tag) => self.documents.iter()
-				.filter(|d| d.tags.contains(tag))
+				.filter(|d| self.tag_config.doc_matches_filter(&d.tags, tag))
 				.collect(),
 			None => self.documents.iter().collect(),
 		}
@@ -374,6 +377,7 @@ pub fn run(connection: &Connection) -> Result<()> {
 	terminal.clear()?;
 
 	let mut app = App::new();
+	app.tag_config = crate::config::load_tag_config(None);
 	app.load_documents(connection)?;
 	app.load_all_tags(connection)?;
 
