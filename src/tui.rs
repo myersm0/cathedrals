@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-	event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+	event::{self, Event, KeyCode, KeyEventKind},
 	execute,
 	terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -656,68 +656,67 @@ fn run_app(
 					_ => {}
 				},
 				Mode::Search => {
-					if key.modifiers.contains(KeyModifiers::COMMAND) && key.code == KeyCode::Char('e') {
-						app.search_mode = match app.search_mode {
-							SearchMode::Fts5 => SearchMode::Semantic,
-							SearchMode::Semantic => SearchMode::Fts5,
-						};
-						app.run_search(connection, search_config)?;
-					} else {
-						match key.code {
-							KeyCode::Esc => {
-								app.mode = Mode::Browse;
-							}
-							KeyCode::Enter => {
-								if app.total_search_chunks > 0 {
-									app.open_search_result(connection)?;
-								}
-							}
-							KeyCode::Up => {
-								if app.search_chunk_index > 0 {
-									app.search_chunk_index -= 1;
-								}
-							}
-							KeyCode::Down => {
-								if app.search_chunk_index + 1 < app.total_search_chunks {
-									app.search_chunk_index += 1;
-								}
-							}
-							KeyCode::Tab => {
-								app.search_field = match app.search_field {
-									SearchField::Query => SearchField::Author,
-									SearchField::Author => SearchField::DateFrom,
-									SearchField::DateFrom => SearchField::DateTo,
-									SearchField::DateTo => SearchField::Query,
-								};
-							}
-							KeyCode::BackTab => {
-								app.search_field = match app.search_field {
-									SearchField::Query => SearchField::DateTo,
-									SearchField::Author => SearchField::Query,
-									SearchField::DateFrom => SearchField::Author,
-									SearchField::DateTo => SearchField::DateFrom,
-								};
-							}
-							KeyCode::Char(c) => {
-								match app.search_field {
-									SearchField::Query => app.search_query.push(c),
-									SearchField::Author => app.author_filter.push(c),
-									SearchField::DateFrom => app.date_from.push(c),
-									SearchField::DateTo => app.date_to.push(c),
-								}
-								app.run_search(connection, search_config)?;
-							}
-							KeyCode::Backspace => {
-								match app.search_field {
-									SearchField::Query => { app.search_query.pop(); }
-									SearchField::Author => { app.author_filter.pop(); }
-									SearchField::DateFrom => { app.date_from.pop(); }
-									SearchField::DateTo => { app.date_to.pop(); }
-								}
-								app.run_search(connection, search_config)?;
-							}
-							_ => {}
+					match key.code {
+						KeyCode::F(2) => {
+							app.search_mode = match app.search_mode {
+								SearchMode::Fts5 => SearchMode::Semantic,
+								SearchMode::Semantic => SearchMode::Fts5,
+							};
+							app.run_search(connection, search_config)?;
 						}
+						KeyCode::Esc => {
+							app.mode = Mode::Browse;
+						}
+						KeyCode::Enter => {
+							if app.total_search_chunks > 0 {
+								app.open_search_result(connection)?;
+							}
+						}
+						KeyCode::Up => {
+							if app.search_chunk_index > 0 {
+								app.search_chunk_index -= 1;
+							}
+						}
+						KeyCode::Down => {
+							if app.search_chunk_index + 1 < app.total_search_chunks {
+								app.search_chunk_index += 1;
+							}
+						}
+						KeyCode::Tab => {
+							app.search_field = match app.search_field {
+								SearchField::Query => SearchField::Author,
+								SearchField::Author => SearchField::DateFrom,
+								SearchField::DateFrom => SearchField::DateTo,
+								SearchField::DateTo => SearchField::Query,
+							};
+						}
+						KeyCode::BackTab => {
+							app.search_field = match app.search_field {
+								SearchField::Query => SearchField::DateTo,
+								SearchField::Author => SearchField::Query,
+								SearchField::DateFrom => SearchField::Author,
+								SearchField::DateTo => SearchField::DateFrom,
+							};
+						}
+						KeyCode::Char(c) => {
+							match app.search_field {
+								SearchField::Query => app.search_query.push(c),
+								SearchField::Author => app.author_filter.push(c),
+								SearchField::DateFrom => app.date_from.push(c),
+								SearchField::DateTo => app.date_to.push(c),
+							}
+							app.run_search(connection, search_config)?;
+						}
+						KeyCode::Backspace => {
+							match app.search_field {
+								SearchField::Query => { app.search_query.pop(); }
+								SearchField::Author => { app.author_filter.pop(); }
+								SearchField::DateFrom => { app.date_from.pop(); }
+								SearchField::DateTo => { app.date_to.pop(); }
+							}
+							app.run_search(connection, search_config)?;
+						}
+						_ => {}
 					}
 				},
 				Mode::TagEdit => match key.code {
@@ -1073,7 +1072,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 		Style::default()
 	};
 	let query_block = Block::default()
-		.title(format!(" Search [{}] ({}) [Ctrl+E: toggle mode] ", mode_str, app.total_search_chunks))
+		.title(format!(" Search [{}] ({}) [F2: toggle mode] ", mode_str, app.total_search_chunks))
 		.borders(Borders::ALL)
 		.border_style(query_style);
 	let query_input = Paragraph::new(app.search_query.as_str()).block(query_block);
@@ -1235,7 +1234,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let help_text = match app.mode {
 		Mode::Browse => "[↑↓/gG] move  [Enter] open  [/] search  [f] filter  [s] sort  [q] quit",
 		Mode::Read => read_help,
-		Mode::Search => "[↑↓] move  [Tab] field  [Ctrl+E] mode  [Enter] open  [Esc] back",
+		Mode::Search => "[↑↓] move  [Tab] field  [F2] mode  [Enter] open  [Esc] back",
 		Mode::TagEdit => "[type] add tag  [Enter] save  [Esc] cancel",
 		Mode::TagFilter => "[↑↓/gG] select  [Enter] apply  [c] clear  [Esc] cancel",
 	};
