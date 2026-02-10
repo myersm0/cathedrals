@@ -231,7 +231,7 @@ fn ingest_file(
 			"positional",
 		)?;
 
-		if let Some(&existing_doc_id) = existing_docs.first() {
+		for &existing_doc_id in &existing_docs {
 			let existing_entries = storage::get_entries_for_document(connection, existing_doc_id)?;
 
 			if let Some((overlap_start, overlap_len)) = find_overlap(&existing_entries, &segmented) {
