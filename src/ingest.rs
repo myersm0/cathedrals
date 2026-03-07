@@ -131,7 +131,7 @@ impl OllamaClient {
 			base_url: base_url.to_string(),
 			model: model.to_string(),
 			client: reqwest::blocking::Client::builder()
-				.timeout(std::time::Duration::from_secs(120))
+				.timeout(std::time::Duration::from_secs(600))
 				.build()
 				.expect("failed to build http client"),
 		}

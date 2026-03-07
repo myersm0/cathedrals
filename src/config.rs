@@ -375,11 +375,17 @@ struct DeriveConfigToml {
 	prompt_version: String,
 	#[serde(default)]
 	prompts: std::collections::HashMap<String, String>,
+	#[serde(default = "default_short_threshold")]
+	short_threshold: usize,
+	#[serde(default = "default_medium_threshold")]
+	medium_threshold: usize,
 }
 
-fn default_detailed_model() -> String { "phi4:14b".to_string() }
-fn default_brief_model() -> String { "phi4:14b".to_string() }
+fn default_detailed_model() -> String { "qwen2.5:32b".to_string() }
+fn default_brief_model() -> String { "qwen2.5:32b".to_string() }
 fn default_prompt_version() -> String { "v1".to_string() }
+fn default_short_threshold() -> usize { 1200 }
+fn default_medium_threshold() -> usize { 3500 }
 
 #[derive(Debug, Clone)]
 pub struct DeriveConfig {
@@ -387,6 +393,8 @@ pub struct DeriveConfig {
 	pub brief_model: String,
 	pub prompt_version: String,
 	pub prompts: std::collections::HashMap<String, String>,
+	pub short_threshold: usize,
+	pub medium_threshold: usize,
 }
 
 impl Default for DeriveConfig {
@@ -396,6 +404,8 @@ impl Default for DeriveConfig {
 			brief_model: default_brief_model(),
 			prompt_version: default_prompt_version(),
 			prompts: std::collections::HashMap::new(),
+			short_threshold: default_short_threshold(),
+			medium_threshold: default_medium_threshold(),
 		}
 	}
 }
@@ -425,6 +435,8 @@ impl DeriveConfig {
 			brief_model: raw.brief_model,
 			prompt_version: raw.prompt_version,
 			prompts,
+			short_threshold: raw.short_threshold,
+			medium_threshold: raw.medium_threshold,
 		})
 	}
 
@@ -444,6 +456,16 @@ impl DeriveConfig {
 		DEFAULT_DETAILED_PROMPT.to_string()
 	}
 
+	pub fn get_detailed_prompt(&self, content_len: usize) -> &'static str {
+		if content_len < self.short_threshold {
+			DETAILED_PROMPT_SHORT
+		} else if content_len < self.medium_threshold {
+			DETAILED_PROMPT_MEDIUM
+		} else {
+			DETAILED_PROMPT_LONG
+		}
+	}
+
 	pub fn get_brief_prompt(&self) -> String {
 		if let Some(path) = self.prompts.get("brief") {
 			if let Ok(text) = std::fs::read_to_string(path) {
@@ -454,18 +476,36 @@ impl DeriveConfig {
 	}
 }
 
-pub const DEFAULT_DETAILED_PROMPT: &str = r#"Summarize the following document in detail. Include:
-- Main topic and purpose
-- Key points, findings, or arguments
-- Important details, names, or dates mentioned
-- Any conclusions, decisions, or action items
-
-Be thorough but concise. Write in plain prose, not bullet points.
+pub const DETAILED_PROMPT_SHORT: &str = r#"Summarize briefly. 1-2 sentences max. No filler.
 
 Document:
 "#;
 
-pub const DEFAULT_BRIEF_PROMPT: &str = r#"Compress the following summary into 1-3 sentences that capture the essential what/who/why. Be extremely concise.
+pub const DETAILED_PROMPT_MEDIUM: &str = r#"Summarize this document. Cover the main points directly.
+Be proportional — a few sentences to a paragraph.
+No hedging, no meta-commentary.
 
-Summary:
+Document:
+"#;
+
+pub const DETAILED_PROMPT_LONG: &str = r#"Summarize this document by section:
+1. What is the main topic/claim?
+2. What evidence or points are made in the body?
+3. What conclusions or outcomes are reached?
+
+Be thorough but not verbose. No filler.
+
+Document:
+"#;
+
+pub const DEFAULT_DETAILED_PROMPT: &str = DETAILED_PROMPT_MEDIUM;
+
+pub const DEFAULT_BRIEF_PROMPT: &str = r#"Compress to 1-2 sentences. Output ONLY the summary, then stop.
+Never include:
+- "---" or separators
+- Explanations of your summary
+- "Feel free to ask" or similar
+- Who/what/why breakdowns
+
+Summary to compress:
 "#;

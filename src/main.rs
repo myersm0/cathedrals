@@ -694,12 +694,11 @@ fn main() -> Result<()> {
 			let ollama = OllamaClient::new(&ollama_url, &model_name);
 
 			for (i, doc_id) in doc_ids.iter().enumerate() {
-				let doc_info: (String, Option<String>) = connection.query_row(
-					"SELECT source_title, doctype_name FROM documents WHERE id = ?1",
+				let source_title: String = connection.query_row(
+					"SELECT source_title FROM documents WHERE id = ?1",
 					[doc_id],
-					|row| Ok((row.get(0)?, row.get(1)?)),
+					|row| row.get(0),
 				)?;
-				let (source_title, doctype_name) = doc_info;
 
 				eprint!("\r  [{}/{}] {}...", i + 1, doc_ids.len(), truncate_string(&source_title, 40));
 
@@ -717,7 +716,7 @@ fn main() -> Result<()> {
 
 				let detailed_body = if need_detailed {
 					let full_text = storage::get_document_full_text(&connection, *doc_id)?;
-					let prompt = derive_config.get_prompt_for_doctype(doctype_name.as_deref());
+					let prompt = derive_config.get_detailed_prompt(full_text.len());
 					let full_prompt = format!("{}\n{}", prompt, full_text);
 
 					let response = ollama.chat(&full_prompt, &derive_config.detailed_model)?;
