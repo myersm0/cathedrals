@@ -318,12 +318,15 @@ struct TagConfigToml {
 	includes: HashMap<String, Vec<String>>,
 	#[serde(default)]
 	defaults: DefaultsToml,
+	#[serde(default)]
+	colors: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct TagConfig {
 	pub includes: HashMap<String, Vec<String>>,
 	pub default_exclude: Vec<String>,
+	pub colors: HashMap<String, String>,
 }
 
 impl TagConfig {
@@ -335,6 +338,7 @@ impl TagConfig {
 		Ok(TagConfig {
 			includes: toml.includes,
 			default_exclude: toml.defaults.exclude,
+			colors: toml.colors,
 		})
 	}
 

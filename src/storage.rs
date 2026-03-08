@@ -487,6 +487,7 @@ pub struct DocumentSummary {
 	pub entry_count: i64,
 	pub chunk_count: i64,
 	pub first_line: Option<String>,
+	pub brief_summary: Option<String>,
 	pub tags: Vec<String>,
 }
 
@@ -522,7 +523,8 @@ pub fn list_documents(
 		        COUNT(DISTINCT e.id) as entry_count,
 		        COUNT(c.id) as chunk_count,
 		        (SELECT SUBSTR(body, 1, 100) FROM entries WHERE document_id = d.id AND LENGTH(TRIM(body)) > 0 ORDER BY position LIMIT 1) as first_line,
-		        (SELECT GROUP_CONCAT(tag, ',') FROM document_tags WHERE document_id = d.id) as tags
+		        (SELECT GROUP_CONCAT(tag, ',') FROM document_tags WHERE document_id = d.id) as tags,
+		        (SELECT SUBSTR(dc.body, 1, 200) FROM derived_content dc WHERE dc.document_id = d.id AND dc.content_type = 'brief' AND dc.quality = 'ok') as brief_summary
 		 FROM documents d
 		 LEFT JOIN entries e ON e.document_id = d.id
 		 LEFT JOIN chunks c ON c.entry_id = e.id
@@ -547,6 +549,7 @@ pub fn list_documents(
 				chunk_count: row.get(6)?,
 				first_line: row.get(7)?,
 				tags,
+				brief_summary: row.get(9)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;

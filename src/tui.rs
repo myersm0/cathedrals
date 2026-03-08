@@ -946,8 +946,13 @@ fn draw(frame: &mut Frame, app: &App) {
 
 	match app.mode {
 		Mode::Browse | Mode::TagFilter => draw_browse(frame, app, chunks[0]),
-		Mode::Read | Mode::TagEdit | Mode::SummaryView => draw_read(frame, app, chunks[0]),
+		Mode::Read | Mode::TagEdit => draw_read(frame, app, chunks[0]),
 		Mode::Search => draw_search(frame, app, chunks[0]),
+		Mode::SummaryView => match app.previous_mode {
+			Mode::Read => draw_read(frame, app, chunks[0]),
+			Mode::Search => draw_search(frame, app, chunks[0]),
+			_ => draw_browse(frame, app, chunks[0]),
+		},
 	}
 
 	if app.mode == Mode::TagFilter {
@@ -982,10 +987,13 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		}
 	};
 
+	const max_dots: usize = 4;
+
 	let header = Line::from(vec![
-		Span::raw("  "),
+		Span::raw("    "),
+		Span::raw(format!("{:<width$}", "", width = max_dots)),
 		Span::styled(
-			format!("{:<45}", format!("Source{}", sort_indicator(SortColumn::Source))),
+			format!("{:<43}", format!("Source{}", sort_indicator(SortColumn::Source))),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 		Span::raw("│ "),
@@ -1000,7 +1008,7 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		),
 		Span::raw("│ "),
 		Span::styled(
-			"Tags / Preview",
+			"Preview",
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 	]);
@@ -1032,22 +1040,8 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		.iter()
 		.map(|doc| {
 			let mark_indicator = if app.marked_docs.contains(&doc.id) { "* " } else { "  " };
-			let source = truncate_str(&doc.source_title, 41);
 			let doctype = doc.doctype_name.as_deref().unwrap_or("-");
 			let date = &doc.clip_date[..10.min(doc.clip_date.len())];
-
-			let tags_str = if doc.tags.is_empty() {
-				String::new()
-			} else {
-				format!("[{}] ", doc.tags.join(", "))
-			};
-
-			let first_line = doc.first_line.as_deref()
-				.map(|s| s.lines().next().unwrap_or(""))
-				.map(|s| s.trim())
-				.unwrap_or("");
-
-			let preview = format!("{}{}", tags_str, first_line);
 
 			let mark_style = if app.marked_docs.contains(&doc.id) {
 				Style::default().fg(Color::Yellow)
@@ -1055,26 +1049,44 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 				Style::default()
 			};
 
-			ListItem::new(Line::from(vec![
-				Span::styled(mark_indicator, mark_style),
-				Span::raw(format!("{:<43}", source)),
-				Span::raw("│ "),
-				Span::raw(format!("{:<10}", truncate_str(doctype, 8))),
-				Span::raw("│ "),
-				Span::raw(format!("{:<12}", date)),
-				Span::raw("│ "),
-				if !doc.tags.is_empty() {
-					Span::styled(
-						truncate_str(&preview, 50).to_string(),
-						Style::default().fg(Color::Cyan),
-					)
-				} else {
-					Span::styled(
-						truncate_str(&preview, 50).to_string(),
-						Style::default().fg(Color::DarkGray),
-					)
-				},
-			]))
+			let mut tag_dots: Vec<Span> = Vec::new();
+			for tag in &doc.tags {
+				if tag_dots.len() >= max_dots {
+					break;
+				}
+				if let Some(color) = app.tag_config.colors.get(tag.as_str()).and_then(|c| parse_color(c)) {
+					tag_dots.push(Span::styled("*", Style::default().fg(color)));
+				}
+			}
+			let padding = max_dots.saturating_sub(tag_dots.len());
+
+			let source = truncate_str(&doc.source_title, 41);
+
+			let preview = doc.brief_summary.as_deref()
+				.unwrap_or_else(|| {
+					doc.first_line.as_deref()
+						.and_then(|s| s.lines().next())
+						.map(|s| s.trim())
+						.unwrap_or("")
+				});
+
+			let mut spans = vec![Span::styled(mark_indicator, mark_style)];
+			spans.extend(tag_dots);
+			if padding > 0 {
+				spans.push(Span::raw(format!("{:<width$}", "", width = padding)));
+			}
+			spans.push(Span::raw(format!("{:<43}", source)));
+			spans.push(Span::raw("│ "));
+			spans.push(Span::raw(format!("{:<10}", truncate_str(doctype, 8))));
+			spans.push(Span::raw("│ "));
+			spans.push(Span::raw(format!("{:<12}", date)));
+			spans.push(Span::raw("│ "));
+			spans.push(Span::styled(
+				truncate_str(preview, 60).to_string(),
+				Style::default().fg(Color::DarkGray),
+			));
+
+			ListItem::new(Line::from(spans))
 		})
 		.collect();
 
@@ -1531,6 +1543,26 @@ fn truncate_string(s: String, max_len: usize) -> String {
 
 fn expand_tabs(s: &str) -> String {
 	s.replace('\t', "    ")
+}
+
+fn parse_color(name: &str) -> Option<Color> {
+	match name.to_lowercase().as_str() {
+		"red" => Some(Color::Red),
+		"green" => Some(Color::Green),
+		"blue" => Some(Color::Blue),
+		"cyan" => Some(Color::Cyan),
+		"magenta" => Some(Color::Magenta),
+		"yellow" => Some(Color::Yellow),
+		"white" => Some(Color::White),
+		"gray" | "grey" => Some(Color::Gray),
+		"light_red" => Some(Color::LightRed),
+		"light_green" => Some(Color::LightGreen),
+		"light_blue" => Some(Color::LightBlue),
+		"light_cyan" => Some(Color::LightCyan),
+		"light_magenta" => Some(Color::LightMagenta),
+		"light_yellow" => Some(Color::LightYellow),
+		_ => None,
+	}
 }
 
 fn align_markdown_tables(text: &str) -> String {
