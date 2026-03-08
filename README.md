@@ -2,6 +2,28 @@
 
 Personal knowledge base for clipped documents. Stores web clips, notes, transcripts, papers in SQLite with full-text and semantic search.
 
+## Installation
+After ensuring the prerequisites (see section below) are met:
+```bash
+curl -fsSL https://raw.githubusercontent.com/myersm0/cathedrals/main/install.sh | sh
+```
+
+This downloads a prebuilt binary for your platform (Linux x86_64, macOS x86_64, macOS ARM) and installs it to ~/.local/bin/.
+
+From source:
+```bash
+git clone https://github.com/myersm0/cathedrals.git
+cd cathedrals
+cargo build --release
+cp target/release/cathedrals ~/.local/bin/
+```
+
+## Prerequisites
+- Install [ollama](https://ollama.com/) (on a Mac you can do `brew install ollama`)
+- ollama running locally with `ollama serve`
+- Pull an embedding model: `ollama pull nomic-embed-text`
+- Pull a summarization model: `ollama pull qwen2.5:32b` (or configure your preferred model in derive.toml)
+
 ## Quick Reference
 
 ```bash
