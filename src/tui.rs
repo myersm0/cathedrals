@@ -90,6 +90,7 @@ struct App {
 	summary_type: SummaryType,
 	summary_doc_id: Option<i64>,
 	summary_scroll: usize,
+	summary_return_mode: Mode,
 }
 
 impl App {
@@ -134,6 +135,7 @@ impl App {
 			summary_type: SummaryType::Brief,
 			summary_doc_id: None,
 			summary_scroll: 0,
+			summary_return_mode: Mode::Browse,
 		}
 	}
 
@@ -684,7 +686,7 @@ fn run_app(
 									app.summary_type = SummaryType::Brief;
 									app.summary_doc_id = Some(doc_id);
 									app.summary_scroll = 0;
-									app.previous_mode = Mode::Browse;
+									app.summary_return_mode = Mode::Browse;
 									app.mode = Mode::SummaryView;
 								} else {
 									app.status_message = Some("No summary - run 'cathedrals derive'".to_string());
@@ -749,7 +751,7 @@ fn run_app(
 								app.summary_type = SummaryType::Detailed;
 								app.summary_doc_id = Some(doc_id);
 								app.summary_scroll = 0;
-								app.previous_mode = Mode::Read;
+								app.summary_return_mode = Mode::Read;
 								app.mode = Mode::SummaryView;
 							} else {
 								app.status_message = Some("No summary - run 'cathedrals derive'".to_string());
@@ -874,7 +876,7 @@ fn run_app(
 				},
 				Mode::SummaryView => match key.code {
 					KeyCode::Esc | KeyCode::Char('q') => {
-						app.mode = app.previous_mode;
+						app.mode = app.summary_return_mode;
 						app.summary_content = None;
 					}
 					KeyCode::Up => {
@@ -917,7 +919,7 @@ fn run_app(
 							if let Ok(Some(content)) = storage::get_derived_content(connection, doc_id, content_type) {
 								let _ = storage::set_derived_quality(connection, content.id, "bad");
 								app.status_message = Some("Marked as bad".to_string());
-								app.mode = app.previous_mode;
+								app.mode = app.summary_return_mode;
 								app.summary_content = None;
 							}
 						}
@@ -948,7 +950,7 @@ fn draw(frame: &mut Frame, app: &App) {
 		Mode::Browse | Mode::TagFilter => draw_browse(frame, app, chunks[0]),
 		Mode::Read | Mode::TagEdit => draw_read(frame, app, chunks[0]),
 		Mode::Search => draw_search(frame, app, chunks[0]),
-		Mode::SummaryView => match app.previous_mode {
+		Mode::SummaryView => match app.summary_return_mode {
 			Mode::Read => draw_read(frame, app, chunks[0]),
 			Mode::Search => draw_search(frame, app, chunks[0]),
 			_ => draw_browse(frame, app, chunks[0]),
