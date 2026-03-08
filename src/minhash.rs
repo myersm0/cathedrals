@@ -62,3 +62,41 @@ pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature) -> f64 {
 pub fn is_short_entry(text: &str) -> bool {
 	text.len() < 50
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn identical_texts_have_jaccard_one() {
+		let a = minhash("the quick brown fox");
+		let b = minhash("the quick brown fox");
+		assert_eq!(jaccard(&a, &b), 1.0);
+	}
+
+	#[test]
+	fn disjoint_texts_have_low_jaccard() {
+		let a = minhash("the quick brown fox jumps over the lazy dog");
+		let b = minhash("quantum mechanics describes subatomic particles");
+		assert!(jaccard(&a, &b) < 0.3);
+	}
+
+	#[test]
+	fn similar_texts_have_moderate_jaccard() {
+		let a = minhash("the quick brown fox jumps over the lazy dog");
+		let b = minhash("the quick brown fox leaps over the lazy dog");
+		assert!(jaccard(&a, &b) > 0.5);
+	}
+
+	#[test]
+	fn empty_text_produces_max_signature() {
+		let sig = minhash("");
+		assert!(sig.iter().all(|&v| v == u64::MAX));
+	}
+
+	#[test]
+	fn short_entry_detection() {
+		assert!(is_short_entry("hi"));
+		assert!(!is_short_entry(&"word ".repeat(20)));
+	}
+}

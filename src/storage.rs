@@ -1183,3 +1183,218 @@ pub fn get_document_full_text(connection: &Connection, document_id: i64) -> Resu
 	}
 	Ok(text)
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::chunking;
+	use crate::minhash;
+	use crate::types::*;
+
+	fn setup_db() -> Connection {
+		let connection = Connection::open_in_memory().unwrap();
+		initialize(&connection).unwrap();
+		connection
+	}
+
+	fn make_entry(body: &str, author: Option<&str>) -> SegmentedEntry {
+		SegmentedEntry {
+			start_line: 1,
+			end_line: 1,
+			body: body.to_string(),
+			author: author.map(|s| s.to_string()),
+			timestamp: None,
+			is_quote: false,
+			heading_level: None,
+			heading_title: None,
+		}
+	}
+
+	fn insert_test_document(connection: &Connection, title: &str, body: &str) -> DocumentId {
+		let entry = make_entry(body, None);
+		let hash = minhash::minhash(body);
+		let doc_id = insert_document(
+			connection, None, title, Some("test"), MergeStrategy::None,
+			Some("/test"), "2024-01-01 00:00:00",
+		).unwrap();
+		let entry_id = insert_entry(
+			connection, doc_id, &entry, 0, title,
+			"2024-01-01 00:00:00", "/test", &hash,
+		).unwrap();
+		let chunks = chunking::chunk_text(body);
+		insert_chunks(connection, entry_id, &chunks).unwrap();
+		doc_id
+	}
+
+	#[test]
+	fn insert_and_retrieve_document() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Test Doc", "Hello world content");
+		let doc = get_document(&db, doc_id.0).unwrap().unwrap();
+		assert_eq!(doc.source_title, "Test Doc");
+		assert_eq!(doc.entries.len(), 1);
+		assert!(doc.entries[0].body.contains("Hello world"));
+	}
+
+	#[test]
+	fn document_count_tracks_inserts() {
+		let db = setup_db();
+		assert_eq!(document_count(&db).unwrap(), 0);
+		insert_test_document(&db, "Doc 1", "content one");
+		assert_eq!(document_count(&db).unwrap(), 1);
+		insert_test_document(&db, "Doc 2", "content two");
+		assert_eq!(document_count(&db).unwrap(), 2);
+	}
+
+	#[test]
+	fn fts5_search_finds_content() {
+		let db = setup_db();
+		insert_test_document(&db, "Rust Guide", "Rust is a systems programming language");
+		insert_test_document(&db, "Python Guide", "Python is a dynamic programming language");
+		let results = search(&db, "rust", SearchSortColumn::Score).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].source_title, "Rust Guide");
+	}
+
+	#[test]
+	fn fts5_search_no_results() {
+		let db = setup_db();
+		insert_test_document(&db, "Doc", "some content");
+		let results = search(&db, "nonexistent", SearchSortColumn::Score).unwrap();
+		assert!(results.is_empty());
+	}
+
+	#[test]
+	fn fts5_search_prefix_matching() {
+		let db = setup_db();
+		insert_test_document(&db, "Doc", "the cathedral and the bazaar");
+		let results = search(&db, "cathed", SearchSortColumn::Score).unwrap();
+		assert_eq!(results.len(), 1);
+	}
+
+	#[test]
+	fn tag_operations() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		add_tag(&db, doc_id.0, "research").unwrap();
+		add_tag(&db, doc_id.0, "rust").unwrap();
+
+		let tags = get_tags_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(tags, vec!["research", "rust"]);
+
+		remove_tag(&db, doc_id.0, "research").unwrap();
+		let tags = get_tags_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(tags, vec!["rust"]);
+	}
+
+	#[test]
+	fn duplicate_tag_ignored() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		add_tag(&db, doc_id.0, "test").unwrap();
+		add_tag(&db, doc_id.0, "test").unwrap();
+		let tags = get_tags_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(tags.len(), 1);
+	}
+
+	#[test]
+	fn list_all_tags_with_counts() {
+		let db = setup_db();
+		let doc1 = insert_test_document(&db, "Doc1", "content");
+		let doc2 = insert_test_document(&db, "Doc2", "content");
+		add_tag(&db, doc1.0, "shared").unwrap();
+		add_tag(&db, doc2.0, "shared").unwrap();
+		add_tag(&db, doc1.0, "unique").unwrap();
+		let tags = list_all_tags(&db).unwrap();
+		assert_eq!(tags.len(), 2);
+		let shared = tags.iter().find(|(t, _)| t == "shared").unwrap();
+		assert_eq!(shared.1, 2);
+	}
+
+	#[test]
+	fn document_exists_by_path_check() {
+		let db = setup_db();
+		assert!(!document_exists_by_path(&db, "/test").unwrap());
+		insert_test_document(&db, "Doc", "content");
+		assert!(document_exists_by_path(&db, "/test").unwrap());
+	}
+
+	#[test]
+	fn embedding_round_trip() {
+		let db = setup_db();
+		insert_test_document(&db, "Doc", "content for embedding");
+		let chunk_id: i64 = db.query_row(
+			"SELECT id FROM chunks LIMIT 1", [], |r| r.get(0),
+		).unwrap();
+		let embedding: Vec<f32> = (0..768).map(|i| i as f32 / 768.0).collect();
+		insert_embedding(&db, chunk_id, &embedding).unwrap();
+		let retrieved = get_embedding(&db, chunk_id).unwrap().unwrap();
+		assert_eq!(retrieved.len(), 768);
+		assert!((retrieved[0] - 0.0).abs() < 1e-6);
+		assert!((retrieved[767] - 767.0 / 768.0).abs() < 1e-6);
+	}
+
+	#[test]
+	fn derived_content_lifecycle() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		assert!(get_derived_content(&db, doc_id.0, "detailed").unwrap().is_none());
+
+		insert_derived_content(
+			&db, doc_id.0, "detailed", "A detailed summary",
+			"test-model", "v1", Some("hash123"), None,
+		).unwrap();
+
+		let content = get_derived_content(&db, doc_id.0, "detailed").unwrap().unwrap();
+		assert_eq!(content.body, "A detailed summary");
+		assert_eq!(content.quality, "ok");
+
+		set_derived_quality(&db, content.id, "bad").unwrap();
+		let content = get_derived_content(&db, doc_id.0, "detailed").unwrap().unwrap();
+		assert_eq!(content.quality, "bad");
+
+		update_derived_content(
+			&db, content.id, "Updated summary", "test-model", "v2", Some("hash456"),
+		).unwrap();
+		let content = get_derived_content(&db, doc_id.0, "detailed").unwrap().unwrap();
+		assert_eq!(content.body, "Updated summary");
+		assert_eq!(content.quality, "ok");
+	}
+
+	#[test]
+	fn list_documents_includes_brief_summary() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		insert_derived_content(
+			&db, doc_id.0, "brief", "A brief summary",
+			"test-model", "v1", None, None,
+		).unwrap();
+
+		let docs = list_documents(&db, SortColumn::Date, SortDirection::Descending).unwrap();
+		assert_eq!(docs.len(), 1);
+		assert_eq!(docs[0].brief_summary.as_deref(), Some("A brief summary"));
+	}
+
+	#[test]
+	fn list_documents_sorts_correctly() {
+		let db = setup_db();
+		let entry = make_entry("content", None);
+		let hash = minhash::minhash("content");
+
+		let doc1 = insert_document(
+			&db, None, "Beta", Some("test"), MergeStrategy::None, None, "2024-01-01 00:00:00",
+		).unwrap();
+		insert_entry(&db, doc1, &entry, 0, "Beta", "2024-01-01 00:00:00", "/a", &hash).unwrap();
+
+		let doc2 = insert_document(
+			&db, None, "Alpha", Some("test"), MergeStrategy::None, None, "2024-06-01 00:00:00",
+		).unwrap();
+		insert_entry(&db, doc2, &entry, 0, "Alpha", "2024-06-01 00:00:00", "/b", &hash).unwrap();
+
+		let by_date = list_documents(&db, SortColumn::Date, SortDirection::Descending).unwrap();
+		assert_eq!(by_date[0].source_title, "Alpha");
+
+		let by_source = list_documents(&db, SortColumn::Source, SortDirection::Ascending).unwrap();
+		assert_eq!(by_source[0].source_title, "Alpha");
+	}
+}
