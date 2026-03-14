@@ -263,8 +263,7 @@ impl App {
 				self.total_search_chunks = self.search_results.iter().map(|r| r.chunks.len()).sum();
 			}
 			SearchMode::Semantic => {
-				let embeddings_exist = storage::count_chunks_with_embeddings(connection)? > 0;
-				if !embeddings_exist {
+				if !storage::vec_table_exists(connection) {
 					self.status_message = Some("No embeddings - run 'cathedrals embed' first".to_string());
 					return Ok(());
 				}
@@ -550,7 +549,7 @@ impl Default for SearchConfig {
 	fn default() -> Self {
 		SearchConfig {
 			ollama_url: "http://localhost:11434".to_string(),
-			embed_model: "nomic-embed-text".to_string(),
+			embed_model: "qwen3-embedding:8b".to_string(),
 		}
 	}
 }

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 
 use cathedrals::chunking;
 use cathedrals::config::{self, Parser};
@@ -12,6 +13,8 @@ use cathedrals::tui;
 use cathedrals::types::*;
 use cathedrals::util;
 
+static VEC_INIT: Once = Once::new();
+
 fn default_db_path() -> PathBuf {
 	dirs::data_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
@@ -23,6 +26,11 @@ fn open_db(path: &Path) -> Result<rusqlite::Connection> {
 	if let Some(parent) = path.parent() {
 		std::fs::create_dir_all(parent)?;
 	}
+	VEC_INIT.call_once(|| unsafe {
+		rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+			sqlite_vec::sqlite3_vec_init as *const (),
+		)));
+	});
 	let connection = rusqlite::Connection::open(path)?;
 	storage::initialize(&connection)?;
 	Ok(connection)
@@ -348,7 +356,7 @@ options:
   --config <path>      config file (default: $XDG_CONFIG_HOME/cathedrals/config.toml)
   --ollama <url>       ollama endpoint (default: http://localhost:11434)
   --model <n>          ollama model for segmentation (default: mistral-nemo)
-  --embed-model <n>    ollama model for embeddings (default: nomic-embed-text)
+  --embed-model <n>    ollama model for embeddings (default: qwen3-embedding:8b)
   --force              re-ingest files even if already in database
   --limit <n>          limit number of items to process
 
@@ -366,7 +374,7 @@ fn main() -> Result<()> {
 	let mut config_path: Option<PathBuf> = None;
 	let mut ollama_url = "http://localhost:11434".to_string();
 	let mut model_name = "mistral-nemo".to_string();
-	let mut embed_model = "nomic-embed-text".to_string();
+	let mut embed_model = "qwen3-embedding:8b".to_string();
 	let mut force = false;
 	let mut tags_include: Option<Vec<String>> = None;
 	let mut tags_exclude: Vec<String> = Vec::new();
@@ -537,6 +545,9 @@ fn main() -> Result<()> {
 
 			for (i, chunk) in chunks.iter().enumerate() {
 				let embedding = ollama.embed(&chunk.body, &embed_model)?;
+				if i == 0 {
+					storage::ensure_vec_table(&connection, embedding.len())?;
+				}
 				storage::insert_embedding(&connection, chunk.id, &embedding)?;
 				if (i + 1) % 10 == 0 || i + 1 == total {
 					eprint!("\r  {}/{}", i + 1, total);
@@ -551,8 +562,7 @@ fn main() -> Result<()> {
 				anyhow::bail!("similar requires a query");
 			}
 
-			let existing = storage::count_chunks_with_embeddings(&connection)?;
-			if existing == 0 {
+			if !storage::vec_table_exists(&connection) {
 				anyhow::bail!("no embeddings yet - run 'cathedrals embed' first");
 			}
 
