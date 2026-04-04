@@ -3,14 +3,15 @@
 Personal knowledge base for clipped documents. Stores web clips, notes, transcripts, papers in SQLite with full-text and semantic search.
 
 ## Installation
-After ensuring the prerequisites (see section below) are met:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/myersm0/cathedrals/main/install.sh | sh
 ```
 
-This downloads a prebuilt binary for your platform (Linux x86_64, macOS x86_64, macOS ARM) and installs it to ~/.local/bin/.
+This downloads a prebuilt binary for your platform (Linux x86_64, macOS x86_64, macOS ARM) and installs it to `~/.local/bin/`.
 
-From source:
+### From source
+
 ```bash
 git clone https://github.com/myersm0/cathedrals.git
 cd cathedrals
@@ -18,11 +19,11 @@ cargo build --release
 cp target/release/cathedrals ~/.local/bin/
 ```
 
-## Prerequisites
-- Install [ollama](https://ollama.com/) (on a Mac you can do `brew install ollama`)
-- ollama running locally with `ollama serve`
-- Pull an embedding model: `ollama pull nomic-embed-text`
-- Pull a summarization model: `ollama pull qwen2.5:32b` (or configure your preferred model in derive.toml)
+### Requirements
+
+- [ollama](https://ollama.com) running locally for embeddings and LLM summaries
+- Pull an embedding model: `ollama pull qwen3-embedding:8b`
+- Pull a summarization model: `ollama pull qwen2.5:32b` (or configure your preferred model in `derive.toml`)
 
 ## Quick Reference
 
@@ -67,25 +68,31 @@ The source line is matched against doctype patterns in `config.toml` to determin
 - `M` — clear marks
 - `d` — view brief summary
 - `f` — filter by tag
+- `F` — clear tag filter
 - `s` — cycle sort column
+- `S` — toggle sort direction
 - `q` — quit
 
 **Read mode**
 - `↑↓` / `g` / `G` — navigate chunks
+- `PgUp` / `PgDn` — jump 5 chunks
 - `←→` — navigate within group (same source title)
 - `d` — view detailed summary
-- `t` — add tag
+- `t` — add/remove tags
 - `y` — yank current chunk
 - `Y` — yank full document
+- `/` — search
 - `b` / `Esc` — back to browse
 
 **Search mode**
 - `F2` — toggle FTS5 / Semantic
-- `Tab` — cycle filter fields (query, author, date range)
+- `Tab` / `Shift-Tab` — cycle filter fields (query, author, date range)
+- `↑↓` — navigate results
 - `Enter` — open result
 - `Esc` — back
 
 **Summary popup**
+- `↑↓` — scroll
 - `d` — toggle brief/detailed
 - `y` — copy summary
 - `x` — mark as bad (for regeneration)
@@ -93,7 +100,7 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 ## Key Concepts
 
-**Doctype**: Parsing configuration matched by source title pattern or extension. Defines parser (whole, markdown, whisper, etc.), merge strategy, and optional preprocessor script.
+**Doctype**: Parsing configuration matched by source title pattern or extension. Defines parser (whole, markdown, whisper, copilot_email, ollama), merge strategy, and optional preprocessor script.
 
 **Merge strategy**: 
 - `none` — each clip creates a new document
@@ -103,15 +110,34 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 **Chunks**: ~500 char fragments of entries, indexed for search.
 
-**Derived content**: LLM-generated summaries (brief + detailed) stored alongside documents. Prompt tier (short/medium/long) is selected based on document length.
+**Derived content**: LLM-generated summaries stored alongside documents. A detailed summary is generated first (prompt tier selected by document length: short/medium/long), then a brief summary is compressed from it. For short documents, the brief summary is copied directly from the detailed summary without an extra LLM call.
 
 ## Config Files
 
 All in `~/.config/cathedrals/`:
 
 - `config.toml` — doctype definitions
-- `tags.toml` — tag aliases, default exclusions
-- `derive.toml` — LLM model selection, thresholds
+- `tags.toml` — tag hierarchy, default exclusions, tag colors
+- `derive.toml` — LLM model selection, prompt thresholds
+
+### Tag Colors
+
+Tags can be assigned colors in `tags.toml`, displayed as colored markers in the browse view:
+
+```toml
+[defaults]
+exclude = ["junk", "archived"]
+
+[includes]
+project-x = ["x-frontend", "x-backend", "x-infra"]
+
+[colors]
+research = "cyan"
+project = "green"
+reference = "blue"
+```
+
+Available colors: red, green, blue, cyan, magenta, yellow, white, gray, light_red, light_green, light_blue, light_cyan, light_magenta, light_yellow.
 
 See `DEVELOPMENT.md` for architecture details.
 
@@ -119,4 +145,4 @@ See `DEVELOPMENT.md` for architecture details.
 
 SQLite at `~/.local/share/cathedrals/cathedrals.db`
 
-To reset: delete the db file. To re-embed: `DELETE FROM chunk_embeddings;` then `cathedrals embed`.
+To reset: delete the db file. To re-embed: drop the vec table (`DROP TABLE vec_chunks;`) then `cathedrals embed`.
