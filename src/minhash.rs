@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::types::{minhash_size, MinHashSignature};
+use crate::types::{MINHASH_SIZE, MinHashSignature};
 
 fn hash_with_seed(seed: usize, token: &str) -> u64 {
 	let mut hasher = DefaultHasher::new();
@@ -24,9 +24,9 @@ fn tokenize(text: &str) -> Vec<String> {
 
 pub fn minhash(text: &str) -> MinHashSignature {
 	let tokens = tokenize(text);
-	let mut signature = [u64::MAX; minhash_size];
+	let mut signature = [u64::MAX; MINHASH_SIZE];
 	for token in &tokens {
-		for i in 0..minhash_size {
+		for i in 0..MINHASH_SIZE {
 			let hash = hash_with_seed(i, token);
 			if hash < signature[i] {
 				signature[i] = hash;
@@ -56,9 +56,47 @@ pub fn minhash_with_context(
 
 pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature) -> f64 {
 	let matches = a.iter().zip(b.iter()).filter(|(x, y)| x == y).count();
-	matches as f64 / minhash_size as f64
+	matches as f64 / MINHASH_SIZE as f64
 }
 
 pub fn is_short_entry(text: &str) -> bool {
 	text.len() < 50
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn identical_texts_have_jaccard_one() {
+		let a = minhash("the quick brown fox");
+		let b = minhash("the quick brown fox");
+		assert_eq!(jaccard(&a, &b), 1.0);
+	}
+
+	#[test]
+	fn disjoint_texts_have_low_jaccard() {
+		let a = minhash("the quick brown fox jumps over the lazy dog");
+		let b = minhash("quantum mechanics describes subatomic particles");
+		assert!(jaccard(&a, &b) < 0.3);
+	}
+
+	#[test]
+	fn similar_texts_have_moderate_jaccard() {
+		let a = minhash("the quick brown fox jumps over the lazy dog");
+		let b = minhash("the quick brown fox leaps over the lazy dog");
+		assert!(jaccard(&a, &b) > 0.5);
+	}
+
+	#[test]
+	fn empty_text_produces_max_signature() {
+		let sig = minhash("");
+		assert!(sig.iter().all(|&v| v == u64::MAX));
+	}
+
+	#[test]
+	fn short_entry_detection() {
+		assert!(is_short_entry("hi"));
+		assert!(!is_short_entry(&"word ".repeat(20)));
+	}
 }

@@ -17,3 +17,5 @@ anyhow = "1"
 regex = "1"
 toml = "0.8"
 dirs = "5"
+sqlite-vec = "0.1.6"
+zerocopy = { version = "0.8", features = ["derive"] }

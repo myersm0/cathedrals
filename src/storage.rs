@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+use zerocopy::IntoBytes;
 
 use crate::types::*;
 
@@ -42,21 +43,6 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		);
 
 		CREATE INDEX IF NOT EXISTS chunks_entry_id ON chunks(entry_id);
-
-		CREATE TABLE IF NOT EXISTS media (
-			id INTEGER PRIMARY KEY,
-			file_path TEXT NOT NULL,
-			media_type TEXT NOT NULL CHECK (media_type IN ('screenshot', 'audio', 'transcript_segment')),
-			timestamp TEXT NOT NULL,
-			duration_seconds REAL,
-			document_id INTEGER REFERENCES documents(id)
-		);
-
-		CREATE TABLE IF NOT EXISTS timeline_links (
-			media_id INTEGER NOT NULL REFERENCES media(id),
-			entry_id INTEGER NOT NULL REFERENCES entries(id),
-			PRIMARY KEY (media_id, entry_id)
-		);
 
 		CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 			body,
@@ -275,19 +261,39 @@ pub fn search_filtered(
 		.collect::<Vec<_>>()
 		.join(" ");
 
-	let mut statement = connection.prepare(
+	let mut conditions = vec!["chunks_fts MATCH ?1".to_string()];
+	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(prefix_query)];
+
+	if let Some(author) = author_like {
+		conditions.push(format!("LOWER(e.author) LIKE ?{}", param_values.len() + 1));
+		param_values.push(Box::new(format!("%{}%", author.to_lowercase())));
+	}
+	if let Some(from) = date_from {
+		conditions.push(format!("e.clip_date >= ?{}", param_values.len() + 1));
+		param_values.push(Box::new(from.to_string()));
+	}
+	if let Some(to) = date_to {
+		conditions.push(format!("e.clip_date <= ?{}", param_values.len() + 1));
+		param_values.push(Box::new(to.to_string()));
+	}
+
+	let sql = format!(
 		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
 		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank,
 		        snippet(chunks_fts, 0, '\x02', '\x03', '\x01', 12)
 		 FROM chunks_fts f
 		 JOIN chunks c ON c.id = f.rowid
 		 JOIN entries e ON e.id = c.entry_id
-		 WHERE chunks_fts MATCH ?1
+		 WHERE {}
 		 ORDER BY f.rank
-		 LIMIT 100",
-	)?;
+		 LIMIT 200",
+		conditions.join(" AND "),
+	);
+
+	let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+	let mut statement = connection.prepare(&sql)?;
 	let rows: Vec<ChunkSearchResult> = statement
-		.query_map(params![prefix_query], |row| {
+		.query_map(param_refs.as_slice(), |row| {
 			Ok(ChunkSearchResult {
 				chunk_id: row.get(0)?,
 				entry_id: row.get(1)?,
@@ -305,30 +311,8 @@ pub fn search_filtered(
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 
-	let author_pattern = author_like.map(|s| s.to_lowercase());
-	let filtered_rows: Vec<ChunkSearchResult> = rows.into_iter()
-		.filter(|row| {
-			if let Some(ref pattern) = author_pattern {
-				if !row.author.as_ref().map(|a| a.to_lowercase().contains(pattern)).unwrap_or(false) {
-					return false;
-				}
-			}
-			if let Some(from) = date_from {
-				if row.clip_date.as_str() < from {
-					return false;
-				}
-			}
-			if let Some(to) = date_to {
-				if row.clip_date.as_str() > to {
-					return false;
-				}
-			}
-			true
-		})
-		.collect();
-
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
-	for row in filtered_rows {
+	for row in rows {
 		let doc = grouped.iter_mut().find(|d| d.document_id == row.document_id);
 		let hit = ChunkHit {
 			entry_id: row.entry_id,
@@ -487,6 +471,7 @@ pub struct DocumentSummary {
 	pub entry_count: i64,
 	pub chunk_count: i64,
 	pub first_line: Option<String>,
+	pub brief_summary: Option<String>,
 	pub tags: Vec<String>,
 }
 
@@ -522,7 +507,8 @@ pub fn list_documents(
 		        COUNT(DISTINCT e.id) as entry_count,
 		        COUNT(c.id) as chunk_count,
 		        (SELECT SUBSTR(body, 1, 100) FROM entries WHERE document_id = d.id AND LENGTH(TRIM(body)) > 0 ORDER BY position LIMIT 1) as first_line,
-		        (SELECT GROUP_CONCAT(tag, ',') FROM document_tags WHERE document_id = d.id) as tags
+		        (SELECT GROUP_CONCAT(tag, ',') FROM document_tags WHERE document_id = d.id) as tags,
+		        (SELECT SUBSTR(dc.body, 1, 200) FROM derived_content dc WHERE dc.document_id = d.id AND dc.content_type = 'brief' AND dc.quality = 'ok') as brief_summary
 		 FROM documents d
 		 LEFT JOIN entries e ON e.document_id = d.id
 		 LEFT JOIN chunks c ON c.entry_id = e.id
@@ -547,6 +533,7 @@ pub fn list_documents(
 				chunk_count: row.get(6)?,
 				first_line: row.get(7)?,
 				tags,
+				brief_summary: row.get(9)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -700,18 +687,40 @@ pub struct ChunkForEmbedding {
 	pub body: String,
 }
 
+pub fn vec_table_exists(connection: &Connection) -> bool {
+	connection
+		.query_row(
+			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vec_chunks'",
+			[],
+			|_| Ok(()),
+		)
+		.is_ok()
+}
+
+pub fn ensure_vec_table(connection: &Connection, dimension: usize) -> Result<()> {
+	if vec_table_exists(connection) {
+		return Ok(());
+	}
+	connection.execute_batch(&format!(
+		"CREATE VIRTUAL TABLE vec_chunks USING vec0(
+			chunk_id INTEGER PRIMARY KEY,
+			embedding float[{}] distance_metric=cosine
+		)",
+		dimension,
+	))?;
+	Ok(())
+}
+
 pub fn get_chunks_without_embeddings(connection: &Connection, limit: Option<usize>) -> Result<Vec<ChunkForEmbedding>> {
+	let base = if vec_table_exists(connection) {
+		"SELECT c.id, c.body FROM chunks c
+		 WHERE c.id NOT IN (SELECT chunk_id FROM vec_chunks)"
+	} else {
+		"SELECT c.id, c.body FROM chunks c"
+	};
 	let query = match limit {
-		Some(n) => format!(
-			"SELECT c.id, c.body FROM chunks c
-			 LEFT JOIN chunk_embeddings ce ON c.id = ce.chunk_id
-			 WHERE ce.chunk_id IS NULL
-			 LIMIT {}",
-			n
-		),
-		None => "SELECT c.id, c.body FROM chunks c
-		         LEFT JOIN chunk_embeddings ce ON c.id = ce.chunk_id
-		         WHERE ce.chunk_id IS NULL".to_string(),
+		Some(n) => format!("{} LIMIT {}", base, n),
+		None => base.to_string(),
 	};
 	let mut stmt = connection.prepare(&query)?;
 	let chunks = stmt
@@ -726,19 +735,17 @@ pub fn get_chunks_without_embeddings(connection: &Connection, limit: Option<usiz
 }
 
 pub fn count_chunks_without_embeddings(connection: &Connection) -> Result<i64> {
-	let count: i64 = connection.query_row(
-		"SELECT COUNT(*) FROM chunks c
-		 LEFT JOIN chunk_embeddings ce ON c.id = ce.chunk_id
-		 WHERE ce.chunk_id IS NULL",
-		[],
-		|row| row.get(0),
-	)?;
-	Ok(count)
+	let total = chunk_count(connection)?;
+	let embedded = count_chunks_with_embeddings(connection)?;
+	Ok(total - embedded)
 }
 
 pub fn count_chunks_with_embeddings(connection: &Connection) -> Result<i64> {
+	if !vec_table_exists(connection) {
+		return Ok(0);
+	}
 	let count: i64 = connection.query_row(
-		"SELECT COUNT(*) FROM chunk_embeddings",
+		"SELECT COUNT(*) FROM vec_chunks",
 		[],
 		|row| row.get(0),
 	)?;
@@ -746,31 +753,11 @@ pub fn count_chunks_with_embeddings(connection: &Connection) -> Result<i64> {
 }
 
 pub fn insert_embedding(connection: &Connection, chunk_id: i64, embedding: &[f32]) -> Result<()> {
-	let bytes: Vec<u8> = embedding.iter()
-		.flat_map(|f| f.to_le_bytes())
-		.collect();
 	connection.execute(
-		"INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding) VALUES (?1, ?2)",
-		params![chunk_id, bytes],
+		"INSERT OR REPLACE INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)",
+		params![chunk_id, embedding.as_bytes()],
 	)?;
 	Ok(())
-}
-
-pub fn get_embedding(connection: &Connection, chunk_id: i64) -> Result<Option<Vec<f32>>> {
-	let result: Option<Vec<u8>> = connection
-		.query_row(
-			"SELECT embedding FROM chunk_embeddings WHERE chunk_id = ?1",
-			params![chunk_id],
-			|row| row.get(0),
-		)
-		.optional()?;
-
-	Ok(result.map(|bytes| {
-		bytes
-			.chunks_exact(4)
-			.map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-			.collect()
-	}))
 }
 
 #[derive(Debug, Clone)]
@@ -802,42 +789,39 @@ pub fn find_similar_chunks_filtered(
 	date_from: Option<&str>,
 	date_to: Option<&str>,
 ) -> Result<Vec<SimilarChunk>> {
+	let fetch_limit = if author_like.is_some() || date_from.is_some() || date_to.is_some() {
+		limit * 5
+	} else {
+		limit
+	};
+
 	let mut stmt = connection.prepare(
-		"SELECT ce.chunk_id, ce.embedding, c.body, e.document_id, e.source_title, e.clip_date, e.author, e.position, c.chunk_index
-		 FROM chunk_embeddings ce
-		 JOIN chunks c ON c.id = ce.chunk_id
-		 JOIN entries e ON e.id = c.entry_id"
+		"WITH knn AS (
+			SELECT chunk_id, distance
+			FROM vec_chunks
+			WHERE embedding MATCH ?1 AND k = ?2
+		)
+		SELECT knn.chunk_id, knn.distance, c.body, e.document_id,
+		       e.source_title, e.clip_date, e.author, e.position, c.chunk_index
+		FROM knn
+		JOIN chunks c ON c.id = knn.chunk_id
+		JOIN entries e ON e.id = c.entry_id
+		ORDER BY knn.distance"
 	)?;
 
 	let mut results: Vec<SimilarChunk> = stmt
-		.query_map([], |row| {
-			let chunk_id: i64 = row.get(0)?;
-			let embedding_bytes: Vec<u8> = row.get(1)?;
-			let body: String = row.get(2)?;
-			let document_id: i64 = row.get(3)?;
-			let source_title: String = row.get(4)?;
-			let clip_date: String = row.get(5)?;
-			let author: Option<String> = row.get(6)?;
-			let entry_position: u32 = row.get(7)?;
-			let chunk_index: u32 = row.get(8)?;
-
-			let embedding: Vec<f32> = embedding_bytes
-				.chunks_exact(4)
-				.map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-				.collect();
-
-			let similarity = cosine_similarity(query_embedding, &embedding);
-
+		.query_map(params![query_embedding.as_bytes(), fetch_limit as i64], |row| {
+			let distance: f32 = row.get(1)?;
 			Ok(SimilarChunk {
-				chunk_id,
-				document_id,
-				source_title,
-				clip_date,
-				body,
-				similarity,
-				author,
-				entry_position,
-				chunk_index,
+				chunk_id: row.get(0)?,
+				document_id: row.get(3)?,
+				source_title: row.get(4)?,
+				clip_date: row.get(5)?,
+				body: row.get(2)?,
+				similarity: 1.0 - distance,
+				author: row.get(6)?,
+				entry_position: row.get(7)?,
+				chunk_index: row.get(8)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -859,23 +843,8 @@ pub fn find_similar_chunks_filtered(
 		results.retain(|r| r.clip_date.as_str() <= to);
 	}
 
-	results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
 	results.truncate(limit);
 	Ok(results)
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-	if a.len() != b.len() || a.is_empty() {
-		return 0.0;
-	}
-	let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-	let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-	let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-	if mag_a == 0.0 || mag_b == 0.0 {
-		0.0
-	} else {
-		dot / (mag_a * mag_b)
-	}
 }
 
 #[derive(Debug, Clone)]
@@ -1196,4 +1165,246 @@ pub fn get_document_full_text(connection: &Connection, document_id: i64) -> Resu
 		text.push_str("\n\n");
 	}
 	Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::chunking;
+	use crate::minhash;
+	use crate::types::*;
+
+	fn setup_db() -> Connection {
+		unsafe {
+			rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+				sqlite_vec::sqlite3_vec_init as *const (),
+			)));
+		}
+		let connection = Connection::open_in_memory().unwrap();
+		initialize(&connection).unwrap();
+		connection
+	}
+
+	fn make_entry(body: &str, author: Option<&str>) -> SegmentedEntry {
+		SegmentedEntry {
+			start_line: 1,
+			end_line: 1,
+			body: body.to_string(),
+			author: author.map(|s| s.to_string()),
+			timestamp: None,
+			is_quote: false,
+			heading_level: None,
+			heading_title: None,
+		}
+	}
+
+	fn insert_test_document(connection: &Connection, title: &str, body: &str) -> DocumentId {
+		let entry = make_entry(body, None);
+		let hash = minhash::minhash(body);
+		let doc_id = insert_document(
+			connection, None, title, Some("test"), MergeStrategy::None,
+			Some("/test"), "2024-01-01 00:00:00",
+		).unwrap();
+		let entry_id = insert_entry(
+			connection, doc_id, &entry, 0, title,
+			"2024-01-01 00:00:00", "/test", &hash,
+		).unwrap();
+		let chunks = chunking::chunk_text(body);
+		insert_chunks(connection, entry_id, &chunks).unwrap();
+		doc_id
+	}
+
+	#[test]
+	fn insert_and_retrieve_document() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Test Doc", "Hello world content");
+		let doc = get_document(&db, doc_id.0).unwrap().unwrap();
+		assert_eq!(doc.source_title, "Test Doc");
+		assert_eq!(doc.entries.len(), 1);
+		assert!(doc.entries[0].body.contains("Hello world"));
+	}
+
+	#[test]
+	fn document_count_tracks_inserts() {
+		let db = setup_db();
+		assert_eq!(document_count(&db).unwrap(), 0);
+		insert_test_document(&db, "Doc 1", "content one");
+		assert_eq!(document_count(&db).unwrap(), 1);
+		insert_test_document(&db, "Doc 2", "content two");
+		assert_eq!(document_count(&db).unwrap(), 2);
+	}
+
+	#[test]
+	fn fts5_search_finds_content() {
+		let db = setup_db();
+		insert_test_document(&db, "Rust Guide", "Rust is a systems programming language");
+		insert_test_document(&db, "Python Guide", "Python is a dynamic programming language");
+		let results = search(&db, "rust", SearchSortColumn::Score).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].source_title, "Rust Guide");
+	}
+
+	#[test]
+	fn fts5_search_no_results() {
+		let db = setup_db();
+		insert_test_document(&db, "Doc", "some content");
+		let results = search(&db, "nonexistent", SearchSortColumn::Score).unwrap();
+		assert!(results.is_empty());
+	}
+
+	#[test]
+	fn fts5_search_prefix_matching() {
+		let db = setup_db();
+		insert_test_document(&db, "Doc", "the cathedral and the bazaar");
+		let results = search(&db, "cathed", SearchSortColumn::Score).unwrap();
+		assert_eq!(results.len(), 1);
+	}
+
+	#[test]
+	fn tag_operations() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		add_tag(&db, doc_id.0, "research").unwrap();
+		add_tag(&db, doc_id.0, "rust").unwrap();
+
+		let tags = get_tags_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(tags, vec!["research", "rust"]);
+
+		remove_tag(&db, doc_id.0, "research").unwrap();
+		let tags = get_tags_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(tags, vec!["rust"]);
+	}
+
+	#[test]
+	fn duplicate_tag_ignored() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		add_tag(&db, doc_id.0, "test").unwrap();
+		add_tag(&db, doc_id.0, "test").unwrap();
+		let tags = get_tags_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(tags.len(), 1);
+	}
+
+	#[test]
+	fn list_all_tags_with_counts() {
+		let db = setup_db();
+		let doc1 = insert_test_document(&db, "Doc1", "content");
+		let doc2 = insert_test_document(&db, "Doc2", "content");
+		add_tag(&db, doc1.0, "shared").unwrap();
+		add_tag(&db, doc2.0, "shared").unwrap();
+		add_tag(&db, doc1.0, "unique").unwrap();
+		let tags = list_all_tags(&db).unwrap();
+		assert_eq!(tags.len(), 2);
+		let shared = tags.iter().find(|(t, _)| t == "shared").unwrap();
+		assert_eq!(shared.1, 2);
+	}
+
+	#[test]
+	fn document_exists_by_path_check() {
+		let db = setup_db();
+		assert!(!document_exists_by_path(&db, "/test").unwrap());
+		insert_test_document(&db, "Doc", "content");
+		assert!(document_exists_by_path(&db, "/test").unwrap());
+	}
+
+	#[test]
+	fn embedding_insert_and_knn_search() {
+		let db = setup_db();
+		insert_test_document(&db, "Doc A", "rust memory safety borrow checker");
+		insert_test_document(&db, "Doc B", "python garbage collection runtime");
+
+		let dim = 8;
+		ensure_vec_table(&db, dim).unwrap();
+
+		let chunk_ids: Vec<i64> = db.prepare("SELECT id FROM chunks ORDER BY id").unwrap()
+			.query_map([], |r| r.get(0)).unwrap()
+			.filter_map(|r| r.ok()).collect();
+		assert_eq!(chunk_ids.len(), 2);
+
+		let emb_a: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+		let emb_b: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+		insert_embedding(&db, chunk_ids[0], &emb_a).unwrap();
+		insert_embedding(&db, chunk_ids[1], &emb_b).unwrap();
+
+		assert_eq!(count_chunks_with_embeddings(&db).unwrap(), 2);
+		assert_eq!(count_chunks_without_embeddings(&db).unwrap(), 0);
+
+		let query: Vec<f32> = vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+		let results = find_similar_chunks(&db, &query, 2).unwrap();
+		assert_eq!(results.len(), 2);
+		assert_eq!(results[0].source_title, "Doc A");
+	}
+
+	#[test]
+	fn vec_table_lifecycle() {
+		let db = setup_db();
+		assert!(!vec_table_exists(&db));
+		ensure_vec_table(&db, 4).unwrap();
+		assert!(vec_table_exists(&db));
+		ensure_vec_table(&db, 4).unwrap();
+	}
+
+	#[test]
+	fn derived_content_lifecycle() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		assert!(get_derived_content(&db, doc_id.0, "detailed").unwrap().is_none());
+
+		insert_derived_content(
+			&db, doc_id.0, "detailed", "A detailed summary",
+			"test-model", "v1", Some("hash123"), None,
+		).unwrap();
+
+		let content = get_derived_content(&db, doc_id.0, "detailed").unwrap().unwrap();
+		assert_eq!(content.body, "A detailed summary");
+		assert_eq!(content.quality, "ok");
+
+		set_derived_quality(&db, content.id, "bad").unwrap();
+		let content = get_derived_content(&db, doc_id.0, "detailed").unwrap().unwrap();
+		assert_eq!(content.quality, "bad");
+
+		update_derived_content(
+			&db, content.id, "Updated summary", "test-model", "v2", Some("hash456"),
+		).unwrap();
+		let content = get_derived_content(&db, doc_id.0, "detailed").unwrap().unwrap();
+		assert_eq!(content.body, "Updated summary");
+		assert_eq!(content.quality, "ok");
+	}
+
+	#[test]
+	fn list_documents_includes_brief_summary() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		insert_derived_content(
+			&db, doc_id.0, "brief", "A brief summary",
+			"test-model", "v1", None, None,
+		).unwrap();
+
+		let docs = list_documents(&db, SortColumn::Date, SortDirection::Descending).unwrap();
+		assert_eq!(docs.len(), 1);
+		assert_eq!(docs[0].brief_summary.as_deref(), Some("A brief summary"));
+	}
+
+	#[test]
+	fn list_documents_sorts_correctly() {
+		let db = setup_db();
+		let entry = make_entry("content", None);
+		let hash = minhash::minhash("content");
+
+		let doc1 = insert_document(
+			&db, None, "Beta", Some("test"), MergeStrategy::None, None, "2024-01-01 00:00:00",
+		).unwrap();
+		insert_entry(&db, doc1, &entry, 0, "Beta", "2024-01-01 00:00:00", "/a", &hash).unwrap();
+
+		let doc2 = insert_document(
+			&db, None, "Alpha", Some("test"), MergeStrategy::None, None, "2024-06-01 00:00:00",
+		).unwrap();
+		insert_entry(&db, doc2, &entry, 0, "Alpha", "2024-06-01 00:00:00", "/b", &hash).unwrap();
+
+		let by_date = list_documents(&db, SortColumn::Date, SortDirection::Descending).unwrap();
+		assert_eq!(by_date[0].source_title, "Alpha");
+
+		let by_source = list_documents(&db, SortColumn::Source, SortDirection::Ascending).unwrap();
+		assert_eq!(by_source[0].source_title, "Alpha");
+	}
 }

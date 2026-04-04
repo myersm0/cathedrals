@@ -21,6 +21,7 @@ use crate::storage::{
 	self, DocumentContent, DocumentSummary,
 	GroupedSearchResult, SearchSortColumn, SortColumn, SortDirection,
 };
+use crate::util::truncate_str;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -90,6 +91,7 @@ struct App {
 	summary_type: SummaryType,
 	summary_doc_id: Option<i64>,
 	summary_scroll: usize,
+	summary_return_mode: Mode,
 }
 
 impl App {
@@ -134,6 +136,7 @@ impl App {
 			summary_type: SummaryType::Brief,
 			summary_doc_id: None,
 			summary_scroll: 0,
+			summary_return_mode: Mode::Browse,
 		}
 	}
 
@@ -260,8 +263,7 @@ impl App {
 				self.total_search_chunks = self.search_results.iter().map(|r| r.chunks.len()).sum();
 			}
 			SearchMode::Semantic => {
-				let embeddings_exist = storage::count_chunks_with_embeddings(connection)? > 0;
-				if !embeddings_exist {
+				if !storage::vec_table_exists(connection) {
 					self.status_message = Some("No embeddings - run 'cathedrals embed' first".to_string());
 					return Ok(());
 				}
@@ -491,10 +493,6 @@ impl App {
 		Ok(())
 	}
 
-	fn remove_tag_at_cursor(&mut self, _connection: &Connection) -> Result<()> {
-		Ok(())
-	}
-
 	fn apply_tag_filter(&mut self) {
 		if self.all_tags.is_empty() {
 			self.tag_filter = None;
@@ -551,7 +549,7 @@ impl Default for SearchConfig {
 	fn default() -> Self {
 		SearchConfig {
 			ollama_url: "http://localhost:11434".to_string(),
-			embed_model: "nomic-embed-text".to_string(),
+			embed_model: "qwen3-embedding:8b".to_string(),
 		}
 	}
 }
@@ -684,7 +682,7 @@ fn run_app(
 									app.summary_type = SummaryType::Brief;
 									app.summary_doc_id = Some(doc_id);
 									app.summary_scroll = 0;
-									app.previous_mode = Mode::Browse;
+									app.summary_return_mode = Mode::Browse;
 									app.mode = Mode::SummaryView;
 								} else {
 									app.status_message = Some("No summary - run 'cathedrals derive'".to_string());
@@ -749,7 +747,7 @@ fn run_app(
 								app.summary_type = SummaryType::Detailed;
 								app.summary_doc_id = Some(doc_id);
 								app.summary_scroll = 0;
-								app.previous_mode = Mode::Read;
+								app.summary_return_mode = Mode::Read;
 								app.mode = Mode::SummaryView;
 							} else {
 								app.status_message = Some("No summary - run 'cathedrals derive'".to_string());
@@ -874,7 +872,7 @@ fn run_app(
 				},
 				Mode::SummaryView => match key.code {
 					KeyCode::Esc | KeyCode::Char('q') => {
-						app.mode = app.previous_mode;
+						app.mode = app.summary_return_mode;
 						app.summary_content = None;
 					}
 					KeyCode::Up => {
@@ -917,7 +915,7 @@ fn run_app(
 							if let Ok(Some(content)) = storage::get_derived_content(connection, doc_id, content_type) {
 								let _ = storage::set_derived_quality(connection, content.id, "bad");
 								app.status_message = Some("Marked as bad".to_string());
-								app.mode = app.previous_mode;
+								app.mode = app.summary_return_mode;
 								app.summary_content = None;
 							}
 						}
@@ -946,8 +944,13 @@ fn draw(frame: &mut Frame, app: &App) {
 
 	match app.mode {
 		Mode::Browse | Mode::TagFilter => draw_browse(frame, app, chunks[0]),
-		Mode::Read | Mode::TagEdit | Mode::SummaryView => draw_read(frame, app, chunks[0]),
+		Mode::Read | Mode::TagEdit => draw_read(frame, app, chunks[0]),
 		Mode::Search => draw_search(frame, app, chunks[0]),
+		Mode::SummaryView => match app.summary_return_mode {
+			Mode::Read => draw_read(frame, app, chunks[0]),
+			Mode::Search => draw_search(frame, app, chunks[0]),
+			_ => draw_browse(frame, app, chunks[0]),
+		},
 	}
 
 	if app.mode == Mode::TagFilter {
@@ -982,10 +985,13 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		}
 	};
 
+	const max_dots: usize = 4;
+
 	let header = Line::from(vec![
-		Span::raw("  "),
+		Span::raw("    "),
+		Span::raw(format!("{:<width$}", "", width = max_dots)),
 		Span::styled(
-			format!("{:<45}", format!("Source{}", sort_indicator(SortColumn::Source))),
+			format!("{:<43}", format!("Source{}", sort_indicator(SortColumn::Source))),
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 		Span::raw("│ "),
@@ -1000,7 +1006,7 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		),
 		Span::raw("│ "),
 		Span::styled(
-			"Tags / Preview",
+			"Preview",
 			Style::default().add_modifier(Modifier::BOLD),
 		),
 	]);
@@ -1032,22 +1038,8 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 		.iter()
 		.map(|doc| {
 			let mark_indicator = if app.marked_docs.contains(&doc.id) { "* " } else { "  " };
-			let source = truncate_str(&doc.source_title, 41);
 			let doctype = doc.doctype_name.as_deref().unwrap_or("-");
 			let date = &doc.clip_date[..10.min(doc.clip_date.len())];
-
-			let tags_str = if doc.tags.is_empty() {
-				String::new()
-			} else {
-				format!("[{}] ", doc.tags.join(", "))
-			};
-
-			let first_line = doc.first_line.as_deref()
-				.map(|s| s.lines().next().unwrap_or(""))
-				.map(|s| s.trim())
-				.unwrap_or("");
-
-			let preview = format!("{}{}", tags_str, first_line);
 
 			let mark_style = if app.marked_docs.contains(&doc.id) {
 				Style::default().fg(Color::Yellow)
@@ -1055,26 +1047,44 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 				Style::default()
 			};
 
-			ListItem::new(Line::from(vec![
-				Span::styled(mark_indicator, mark_style),
-				Span::raw(format!("{:<43}", source)),
-				Span::raw("│ "),
-				Span::raw(format!("{:<10}", truncate_str(doctype, 8))),
-				Span::raw("│ "),
-				Span::raw(format!("{:<12}", date)),
-				Span::raw("│ "),
-				if !doc.tags.is_empty() {
-					Span::styled(
-						truncate_str(&preview, 50).to_string(),
-						Style::default().fg(Color::Cyan),
-					)
-				} else {
-					Span::styled(
-						truncate_str(&preview, 50).to_string(),
-						Style::default().fg(Color::DarkGray),
-					)
-				},
-			]))
+			let mut tag_dots: Vec<Span> = Vec::new();
+			for tag in &doc.tags {
+				if tag_dots.len() >= max_dots {
+					break;
+				}
+				if let Some(color) = app.tag_config.colors.get(tag.as_str()).and_then(|c| parse_color(c)) {
+					tag_dots.push(Span::styled("*", Style::default().fg(color)));
+				}
+			}
+			let padding = max_dots.saturating_sub(tag_dots.len());
+
+			let source = truncate_str(&doc.source_title, 41);
+
+			let preview = doc.brief_summary.as_deref()
+				.unwrap_or_else(|| {
+					doc.first_line.as_deref()
+						.and_then(|s| s.lines().next())
+						.map(|s| s.trim())
+						.unwrap_or("")
+				});
+
+			let mut spans = vec![Span::styled(mark_indicator, mark_style)];
+			spans.extend(tag_dots);
+			if padding > 0 {
+				spans.push(Span::raw(format!("{:<width$}", "", width = padding)));
+			}
+			spans.push(Span::raw(format!("{:<43}", source)));
+			spans.push(Span::raw("│ "));
+			spans.push(Span::raw(format!("{:<10}", truncate_str(doctype, 8))));
+			spans.push(Span::raw("│ "));
+			spans.push(Span::raw(format!("{:<12}", date)));
+			spans.push(Span::raw("│ "));
+			spans.push(Span::styled(
+				truncate_str(preview, 60).to_string(),
+				Style::default().fg(Color::DarkGray),
+			));
+
+			ListItem::new(Line::from(spans))
 		})
 		.collect();
 
@@ -1505,32 +1515,28 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
 	)
 }
 
-fn truncate_str(s: &str, max_len: usize) -> &str {
-	if s.len() <= max_len {
-		s
-	} else {
-		let mut end = max_len;
-		while end > 0 && !s.is_char_boundary(end) {
-			end -= 1;
-		}
-		&s[..end]
-	}
-}
-
-fn truncate_string(s: String, max_len: usize) -> String {
-	if s.len() <= max_len {
-		s
-	} else {
-		let mut end = max_len;
-		while end > 0 && !s.is_char_boundary(end) {
-			end -= 1;
-		}
-		s[..end].to_string()
-	}
-}
-
 fn expand_tabs(s: &str) -> String {
 	s.replace('\t', "    ")
+}
+
+fn parse_color(name: &str) -> Option<Color> {
+	match name.to_lowercase().as_str() {
+		"red" => Some(Color::Red),
+		"green" => Some(Color::Green),
+		"blue" => Some(Color::Blue),
+		"cyan" => Some(Color::Cyan),
+		"magenta" => Some(Color::Magenta),
+		"yellow" => Some(Color::Yellow),
+		"white" => Some(Color::White),
+		"gray" | "grey" => Some(Color::Gray),
+		"light_red" => Some(Color::LightRed),
+		"light_green" => Some(Color::LightGreen),
+		"light_blue" => Some(Color::LightBlue),
+		"light_cyan" => Some(Color::LightCyan),
+		"light_magenta" => Some(Color::LightMagenta),
+		"light_yellow" => Some(Color::LightYellow),
+		_ => None,
+	}
 }
 
 fn align_markdown_tables(text: &str) -> String {
@@ -1796,50 +1802,17 @@ fn parse_snippet<'a>(snippet: &str, base_style: Style) -> Vec<Span<'a>> {
 }
 
 fn extract_group_key(source_title: &str) -> Option<String> {
-	let suffixes = [
-		" - Claude - Brave",
-		" - Claude",
-		" — Claude - Brave", 
-		" — Claude",
-		" - Brave",
-		" - Firefox",
-		" - Chrome",
-		" - Safari",
-	];
+	let key = crate::util::strip_source_suffix(source_title);
 
-	let mut key = source_title.to_string();
-	for suffix in suffixes {
-		if let Some(stripped) = key.strip_suffix(suffix) {
-			key = stripped.to_string();
-			break;
-		}
-	}
-
-	let key = key.trim();
-
-	if key.is_empty() {
+	if key.is_empty() || key.len() < 3 {
 		return None;
 	}
 
 	let lower = key.to_lowercase();
-	let generic = [
-		"untitled",
-		"new tab",
-		"bash",
-		"zsh",
-		"terminal",
-		"new document",
-	];
-
-	for pattern in generic {
-		if lower.contains(pattern) {
-			return None;
-		}
-	}
-
-	if key.len() < 3 {
+	let generic = ["untitled", "new tab", "bash", "zsh", "terminal", "new document"];
+	if generic.iter().any(|pattern| lower.contains(pattern)) {
 		return None;
 	}
 
-	Some(key.to_string())
+	Some(key)
 }

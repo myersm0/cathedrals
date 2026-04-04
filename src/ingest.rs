@@ -394,28 +394,101 @@ pub fn parse_copilot_email_summary(text: &str) -> Vec<SegmentedEntry> {
 	entries
 }
 
-pub fn normalize_email_subject(subject: &str) -> String {
-	let mut s = subject.to_lowercase();
-	loop {
-		let trimmed = s.trim();
-		if let Some(rest) = trimmed.strip_prefix("re:") {
-			s = rest.to_string();
-		} else if let Some(rest) = trimmed.strip_prefix("fwd:") {
-			s = rest.to_string();
-		} else if let Some(rest) = trimmed.strip_prefix("fw:") {
-			s = rest.to_string();
-		} else {
-			break;
-		}
-	}
-	s.trim().to_string()
-}
+#[cfg(test)]
+mod tests {
+	use super::*;
 
-pub fn email_entry_key(entry: &SegmentedEntry) -> Option<(String, String, String)> {
-	let from = entry.author.as_ref()?;
-	let date = entry.timestamp.as_ref()?;
-	let subject = entry.heading_title.as_ref()
-		.map(|s| normalize_email_subject(s))
-		.unwrap_or_default();
-	Some((from.to_lowercase(), date.clone(), subject))
+	#[test]
+	fn parse_source_header_valid() {
+		assert_eq!(
+			parse_source_header("# source: My Article - Brave"),
+			Some("My Article - Brave".to_string()),
+		);
+	}
+
+	#[test]
+	fn parse_source_header_extra_whitespace() {
+		assert_eq!(
+			parse_source_header("# source:   padded title  "),
+			Some("padded title".to_string()),
+		);
+	}
+
+	#[test]
+	fn parse_source_header_missing() {
+		assert_eq!(parse_source_header("no source line"), None);
+		assert_eq!(parse_source_header("## source: wrong prefix"), None);
+	}
+
+	#[test]
+	fn parse_clip_date_underscore_dash() {
+		let date = parse_clip_date("20240315_14-30-00.txt");
+		assert!(date.is_some());
+		let date = date.unwrap();
+		assert_eq!(date.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-03-15 14:30:00");
+	}
+
+	#[test]
+	fn parse_clip_date_underscore_nondash() {
+		let date = parse_clip_date("20240315_143000.txt");
+		assert!(date.is_some());
+	}
+
+	#[test]
+	fn parse_clip_date_invalid() {
+		assert!(parse_clip_date("notes.txt").is_none());
+		assert!(parse_clip_date("random_name.txt").is_none());
+	}
+
+	#[test]
+	fn copilot_email_single_message() {
+		let text = "From: Alice\nDate: 2024-01-15\nSubject: Hello\n\nHey there, how are you?";
+		let entries = parse_copilot_email_summary(text);
+		assert_eq!(entries.len(), 1);
+		assert_eq!(entries[0].author.as_deref(), Some("Alice"));
+		assert_eq!(entries[0].timestamp.as_deref(), Some("2024-01-15"));
+		assert_eq!(entries[0].heading_title.as_deref(), Some("Hello"));
+		assert!(entries[0].body.contains("Hey there"));
+	}
+
+	#[test]
+	fn copilot_email_multiple_messages() {
+		let text = "From: Alice\nDate: 2024-01-15\n\nFirst message\nEMAIL\nFrom: Bob\nDate: 2024-01-16\n\nSecond message";
+		let entries = parse_copilot_email_summary(text);
+		assert_eq!(entries.len(), 2);
+		assert_eq!(entries[0].author.as_deref(), Some("Alice"));
+		assert_eq!(entries[1].author.as_deref(), Some("Bob"));
+	}
+
+	#[test]
+	fn copilot_email_empty() {
+		let entries = parse_copilot_email_summary("");
+		assert!(entries.is_empty());
+	}
+
+	#[test]
+	fn merge_consecutive_same_author_combines() {
+		let entries = vec![
+			SegmentedEntry {
+				start_line: 1, end_line: 2, body: "first".to_string(),
+				author: Some("alice".to_string()), timestamp: None,
+				is_quote: false, heading_level: None, heading_title: None,
+			},
+			SegmentedEntry {
+				start_line: 3, end_line: 4, body: "second".to_string(),
+				author: Some("alice".to_string()), timestamp: None,
+				is_quote: false, heading_level: None, heading_title: None,
+			},
+			SegmentedEntry {
+				start_line: 5, end_line: 6, body: "third".to_string(),
+				author: Some("bob".to_string()), timestamp: None,
+				is_quote: false, heading_level: None, heading_title: None,
+			},
+		];
+		let merged = merge_consecutive_same_author(entries);
+		assert_eq!(merged.len(), 2);
+		assert!(merged[0].body.contains("first"));
+		assert!(merged[0].body.contains("second"));
+		assert_eq!(merged[1].author.as_deref(), Some("bob"));
+	}
 }

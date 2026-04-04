@@ -22,3 +22,15 @@ exclude = ["junk", "archived"]
 # - Filtering by "maupassant-parser" finds only docs tagged "maupassant-parser"
 
 [includes]
+
+# Tag colors - shown as colored dots (●) in the browse view.
+# Available: red, green, blue, cyan, magenta, yellow, white, gray,
+#            light_red, light_green, light_blue, light_cyan, light_magenta, light_yellow
+#
+# Example:
+# [colors]
+# research = "blue"
+# project = "green"
+# reference = "cyan"
+
+[colors]
