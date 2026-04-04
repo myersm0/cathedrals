@@ -78,12 +78,13 @@ pub fn run(
 			util::truncate_str(&source_title, 40),
 		);
 
-		let detailed_body = derive_detailed(
+		let (detailed_body, content_len) = derive_detailed(
 			connection, ollama, derive_config, *doc_id, options.force, options.stale,
 		)?;
 
 		derive_brief(
-			connection, ollama, derive_config, *doc_id, &detailed_body, options.force,
+			connection, ollama, derive_config, *doc_id,
+			&detailed_body, content_len, options.force,
 		)?;
 	}
 	eprintln!();
@@ -98,7 +99,7 @@ fn derive_detailed(
 	doc_id: i64,
 	force: bool,
 	check_stale: bool,
-) -> Result<String> {
+) -> Result<(String, usize)> {
 	let existing = storage::get_derived_content(connection, doc_id, "detailed")?;
 
 	let need_regen = force
@@ -112,12 +113,14 @@ fn derive_detailed(
 				.unwrap_or(true)
 		});
 
+	let full_text = storage::get_document_full_text(connection, doc_id)?;
+	let content_len = full_text.len();
+
 	if !need_regen {
-		return Ok(existing.map(|d| d.body).unwrap_or_default());
+		return Ok((existing.map(|d| d.body).unwrap_or_default(), content_len));
 	}
 
-	let full_text = storage::get_document_full_text(connection, doc_id)?;
-	let prompt = config.get_detailed_prompt(full_text.len());
+	let prompt = config.get_detailed_prompt(content_len);
 	let full_prompt = format!("{}\n{}", prompt, full_text);
 	let response = ollama.chat(&full_prompt, &config.detailed_model)?;
 	let source_hash = storage::compute_document_source_hash(connection, doc_id)?;
@@ -134,7 +137,7 @@ fn derive_detailed(
 		)?;
 	}
 
-	Ok(response)
+	Ok((response, content_len))
 }
 
 fn derive_brief(
@@ -143,6 +146,7 @@ fn derive_brief(
 	config: &DeriveConfig,
 	doc_id: i64,
 	detailed_body: &str,
+	content_len: usize,
 	force: bool,
 ) -> Result<()> {
 	if detailed_body.is_empty() {
@@ -159,9 +163,13 @@ fn derive_brief(
 		return Ok(());
 	}
 
-	let brief_prompt = config.get_brief_prompt();
-	let full_prompt = format!("{}\n{}", brief_prompt, detailed_body);
-	let response = ollama.chat(&full_prompt, &config.brief_model)?;
+	let response = if content_len < config.short_threshold {
+		detailed_body.to_string()
+	} else {
+		let brief_prompt = config.get_brief_prompt();
+		let full_prompt = format!("{}\n{}", brief_prompt, detailed_body);
+		ollama.chat(&full_prompt, &config.brief_model)?
+	};
 
 	let parent_id = storage::get_derived_content(connection, doc_id, "detailed")?
 		.map(|d| d.id);
