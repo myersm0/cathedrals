@@ -2,7 +2,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::config::DeriveConfig;
-use crate::ingest::OllamaClient;
+use crate::ollama::OllamaClient;
 use crate::storage;
 use crate::util;
 

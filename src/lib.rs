@@ -4,6 +4,7 @@ pub mod derive;
 pub mod types;
 pub mod minhash;
 pub mod markdown;
+pub mod ollama;
 pub mod storage;
 pub mod ingest;
 pub mod util;

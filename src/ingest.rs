@@ -1,35 +1,11 @@
 use anyhow::{Context, Result};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 
+use crate::ollama::OllamaClient;
 use crate::types::{SegmentedEntry, SegmentationResult};
-
-#[derive(Serialize)]
-struct OllamaRequest {
-	model: String,
-	prompt: String,
-	system: String,
-	stream: bool,
-	format: String,
-}
-
-#[derive(Deserialize)]
-struct OllamaResponse {
-	response: String,
-}
-
-#[derive(Serialize)]
-struct OllamaEmbeddingRequest {
-	model: String,
-	prompt: String,
-}
-
-#[derive(Deserialize)]
-struct OllamaEmbeddingResponse {
-	embedding: Vec<f32>,
-}
 
 #[derive(Deserialize)]
 struct PreprocessorOutput {
@@ -119,139 +95,71 @@ impl Default for SegmentationOptions {
 	}
 }
 
-pub struct OllamaClient {
-	pub base_url: String,
-	pub model: String,
-	client: reqwest::blocking::Client,
-}
+pub fn segment(
+	client: &OllamaClient,
+	source_title: &str,
+	text: &str,
+	options: &SegmentationOptions,
+) -> Result<SegmentationResult> {
+	let lines: Vec<&str> = text.lines().collect();
+	let numbered: String = lines
+		.iter()
+		.enumerate()
+		.map(|(index, line)| format!("{}: {}", index + 1, line))
+		.collect::<Vec<_>>()
+		.join("\n");
 
-impl OllamaClient {
-	pub fn new(base_url: &str, model: &str) -> Self {
-		OllamaClient {
-			base_url: base_url.to_string(),
-			model: model.to_string(),
-			client: reqwest::blocking::Client::builder()
-				.timeout(std::time::Duration::from_secs(600))
-				.build()
-				.expect("failed to build http client"),
-		}
+	let prompt = format!(
+		"Window title: {}\n\nText (with line numbers):\n{}",
+		source_title, numbered
+	);
+
+	let mut system_prompt = segmentation_system_prompt().to_string();
+	if let Some(doctype_prompt) = &options.doctype_prompt {
+		system_prompt.push_str("\n\nADDITIONAL RULES FOR THIS DOCUMENT TYPE:\n");
+		system_prompt.push_str(doctype_prompt);
 	}
 
-	pub fn segment(
-		&self,
-		source_title: &str,
-		text: &str,
-		options: &SegmentationOptions,
-	) -> Result<SegmentationResult> {
-		let lines: Vec<&str> = text.lines().collect();
-		let numbered: String = lines
-			.iter()
-			.enumerate()
-			.map(|(index, line)| format!("{}: {}", index + 1, line))
-			.collect::<Vec<_>>()
-			.join("\n");
+	let response = client.generate(&prompt, &client.model, Some(&system_prompt), Some("json"))?;
 
-		let prompt = format!(
-			"Window title: {}\n\nText (with line numbers):\n{}",
-			source_title, numbered
-		);
+	let parsed: SegmentationJson = serde_json::from_str(&response)
+		.or_else(|_| {
+			let entries: Vec<SegmentedEntryJson> = serde_json::from_str(&response)?;
+			Ok(SegmentationJson { entries })
+		})
+		.map_err(|error: serde_json::Error| {
+			let preview: String = response.chars().take(300).collect();
+			anyhow::anyhow!("failed to parse segmentation response: {}\nollama returned: {}", error, preview)
+		})?;
 
-		let mut system_prompt = segmentation_system_prompt().to_string();
-		if let Some(doctype_prompt) = &options.doctype_prompt {
-			system_prompt.push_str("\n\nADDITIONAL RULES FOR THIS DOCUMENT TYPE:\n");
-			system_prompt.push_str(doctype_prompt);
-		}
-
-		let request = OllamaRequest {
-			model: self.model.clone(),
-			prompt,
-			system: system_prompt,
-			stream: false,
-			format: "json".to_string(),
-		};
-
-		let response: OllamaResponse = self
-			.client
-			.post(format!("{}/api/generate", self.base_url))
-			.json(&request)
-			.send()?
-			.json()?;
-
-		let parsed: SegmentationJson = serde_json::from_str(&response.response)
-			.or_else(|_| {
-				let entries: Vec<SegmentedEntryJson> = serde_json::from_str(&response.response)?;
-				Ok(SegmentationJson { entries })
+	let mut entries: Vec<SegmentedEntry> = parsed
+		.entries
+		.into_iter()
+		.filter_map(|entry| {
+			let body = extract_body(&lines, entry.body_start_line, entry.body_end_line);
+			let body = apply_cleanup(&body, &options.cleanup_patterns);
+			let body = body.trim().to_string();
+			if body.is_empty() {
+				return None;
+			}
+			Some(SegmentedEntry {
+				start_line: entry.body_start_line,
+				end_line: entry.body_end_line,
+				author: entry.author,
+				timestamp: entry.timestamp,
+				body,
+				is_quote: false,
+				heading_level: None,
+				heading_title: None,
 			})
-			.map_err(|error: serde_json::Error| {
-				let preview: String = response.response.chars().take(300).collect();
-				anyhow::anyhow!("failed to parse segmentation response: {}\nollama returned: {}", error, preview)
-			})?;
+		})
+		.collect();
 
-		let mut entries: Vec<SegmentedEntry> = parsed
-			.entries
-			.into_iter()
-			.filter_map(|entry| {
-				let body = extract_body(&lines, entry.body_start_line, entry.body_end_line);
-				let body = apply_cleanup(&body, &options.cleanup_patterns);
-				let body = body.trim().to_string();
-				if body.is_empty() {
-					return None;
-				}
-				Some(SegmentedEntry {
-					start_line: entry.body_start_line,
-					end_line: entry.body_end_line,
-					author: entry.author,
-					timestamp: entry.timestamp,
-					body,
-					is_quote: false,
-					heading_level: None,
-					heading_title: None,
-				})
-			})
-			.collect();
-
-		if options.merge_consecutive_same_author {
-			entries = merge_consecutive_same_author(entries);
-		}
-
-		Ok(SegmentationResult { entries })
+	if options.merge_consecutive_same_author {
+		entries = merge_consecutive_same_author(entries);
 	}
 
-	pub fn embed(&self, text: &str, model: &str) -> Result<Vec<f32>> {
-		let request = OllamaEmbeddingRequest {
-			model: model.to_string(),
-			prompt: text.to_string(),
-		};
-
-		let response: OllamaEmbeddingResponse = self
-			.client
-			.post(format!("{}/api/embeddings", self.base_url))
-			.json(&request)
-			.send()?
-			.json()?;
-
-		Ok(response.embedding)
-	}
-
-	pub fn chat(&self, prompt: &str, model: &str) -> Result<String> {
-		let request = serde_json::json!({
-			"model": model,
-			"prompt": prompt,
-			"stream": false
-		});
-
-		let response: serde_json::Value = self
-			.client
-			.post(format!("{}/api/generate", self.base_url))
-			.json(&request)
-			.send()?
-			.json()?;
-
-		response["response"]
-			.as_str()
-			.map(|s| s.to_string())
-			.ok_or_else(|| anyhow::anyhow!("no response field in ollama output"))
-	}
+	Ok(SegmentationResult { entries })
 }
 
 fn extract_body(lines: &[&str], start_line: usize, end_line: usize) -> String {

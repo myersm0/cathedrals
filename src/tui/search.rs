@@ -9,7 +9,7 @@ use ratatui::{
 };
 use rusqlite::Connection;
 
-use crate::ingest::OllamaClient;
+use crate::ollama::OllamaClient;
 use crate::storage::{self, GroupedSearchResult, SearchSortColumn};
 use crate::util::truncate_str;
 use super::{App, Mode, SearchConfig, SearchField, SearchMode};

@@ -5,7 +5,8 @@ use std::sync::Once;
 use cathedrals::chunking;
 use cathedrals::config::{self, Parser};
 use cathedrals::derive::{self, DeriveOptions};
-use cathedrals::ingest::{self, OllamaClient, SegmentationOptions, run_preprocessor};
+use cathedrals::ingest::{self, SegmentationOptions, run_preprocessor};
+use cathedrals::ollama::OllamaClient;
 use cathedrals::markdown;
 use cathedrals::minhash;
 use cathedrals::storage::{self, SearchSortColumn};
@@ -161,7 +162,7 @@ fn ingest_file(
 			Parser::Markdown => markdown::parse_markdown_sections(&body),
 			Parser::CopilotEmail => ingest::parse_copilot_email_summary(&body),
 			Parser::Ollama => {
-				let result = ollama.segment(&source_title, &body, &segmentation_options)?;
+				let result = ingest::segment(ollama, &source_title, &body, &segmentation_options)?;
 				result.entries
 			}
 			Parser::Whisper => {
