@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
+use serde::Serialize;
 use zerocopy::IntoBytes;
 
 use super::documents::chunk_count;
@@ -83,7 +84,7 @@ pub fn insert_embedding(connection: &Connection, chunk_id: i64, embedding: &[f32
 	Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SimilarChunk {
 	pub chunk_id: i64,
 	pub document_id: i64,

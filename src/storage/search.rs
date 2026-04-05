@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::Connection;
+use serde::Serialize;
 
 pub struct ChunkSearchResult {
 	pub chunk_id: i64,
@@ -16,6 +17,7 @@ pub struct ChunkSearchResult {
 	pub rank: f64,
 }
 
+#[derive(Serialize)]
 pub struct GroupedSearchResult {
 	pub document_id: i64,
 	pub source_title: String,
@@ -24,6 +26,7 @@ pub struct GroupedSearchResult {
 	pub chunks: Vec<ChunkHit>,
 }
 
+#[derive(Serialize)]
 pub struct ChunkHit {
 	pub entry_id: i64,
 	pub entry_position: u32,

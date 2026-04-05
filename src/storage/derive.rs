@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct DerivedContent {
@@ -134,7 +135,7 @@ pub fn compute_document_source_hash(connection: &Connection, document_id: i64) -
 	Ok(format!("{:016x}", hasher.finish()))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct DeriveStatus {
 	pub total_docs: i64,
 	pub with_detailed: i64,

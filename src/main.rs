@@ -42,6 +42,7 @@ fn print_usage() {
   cathedrals derive [options]          generate LLM summaries
   cathedrals similar <query>           semantic search using embeddings
   cathedrals search <query>            keyword search chunks
+  cathedrals get <id>                  get document by id
   cathedrals dump [filter]             dump documents
   cathedrals stats                     show database statistics
 
@@ -61,6 +62,7 @@ options:
   --embed-model <n>    ollama model for embeddings (default: qwen3-embedding:8b)
   --force              re-ingest files even if already in database
   --limit <n>          limit number of items to process
+  --json               output as JSON (for search, similar, get, dump, stats, derive --status)
 
 tag filtering (browse mode):
   --tags <t1,t2,...>   only show docs matching these tags
@@ -78,6 +80,7 @@ fn main() -> Result<()> {
 	let mut model_name = "mistral-nemo".to_string();
 	let mut embed_model = "qwen3-embedding:8b".to_string();
 	let mut force = false;
+	let mut json_output = false;
 	let mut tags_include: Option<Vec<String>> = None;
 	let mut tags_exclude: Vec<String> = Vec::new();
 	let mut include_all = false;
@@ -113,6 +116,7 @@ fn main() -> Result<()> {
 				embed_model = args[index].clone();
 			}
 			"--force" => force = true,
+			"--json" => json_output = true,
 			"--limit" => {
 				index += 1;
 				limit = Some(args[index].parse().context("--limit requires a number")?);
@@ -167,7 +171,9 @@ fn main() -> Result<()> {
 				anyhow::bail!("search requires a query");
 			}
 			let results = storage::search(&connection, &query, SearchSortColumn::Score)?;
-			if results.is_empty() {
+			if json_output {
+				println!("{}", serde_json::to_string_pretty(&results)?);
+			} else if results.is_empty() {
 				println!("no results");
 			} else {
 				for doc in &results {
@@ -195,38 +201,53 @@ fn main() -> Result<()> {
 			let entries = storage::entry_count(&connection)?;
 			let chunks = storage::chunk_count(&connection)?;
 			let embeddings = storage::count_chunks_with_embeddings(&connection)?;
-			println!("database: {}", db_path.display());
-			println!("documents: {}", documents);
-			println!("entries: {}", entries);
-			println!("chunks: {}", chunks);
-			println!("embeddings: {}/{}", embeddings, chunks);
+			if json_output {
+				println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+					"database": db_path.display().to_string(),
+					"documents": documents,
+					"entries": entries,
+					"chunks": chunks,
+					"embeddings": embeddings,
+					"embeddings_total": chunks,
+				}))?);
+			} else {
+				println!("database: {}", db_path.display());
+				println!("documents: {}", documents);
+				println!("entries: {}", entries);
+				println!("chunks: {}", chunks);
+				println!("embeddings: {}/{}", embeddings, chunks);
+			}
 		}
 		Some("dump") => {
 			let query = positional[1..].join(" ");
 			let filter = if query.is_empty() { None } else { Some(query.as_str()) };
 			let results = storage::dump_document(&connection, filter)?;
-			for doc in &results {
-				println!("=== [{}] {} (id={}) ===", doc.merge_strategy, doc.source_title, doc.document_id);
-				for entry in &doc.entries {
-					let author_str = entry.author.as_deref().unwrap_or("");
-					let heading_str = entry.heading_title.as_deref().unwrap_or("");
-					if !author_str.is_empty() || !heading_str.is_empty() {
-						print!("  --- ");
-						if !author_str.is_empty() {
-							print!("{}", author_str);
-						}
-						if !heading_str.is_empty() {
+			if json_output {
+				println!("{}", serde_json::to_string_pretty(&results)?);
+			} else {
+				for doc in &results {
+					println!("=== [{}] {} (id={}) ===", doc.merge_strategy, doc.source_title, doc.document_id);
+					for entry in &doc.entries {
+						let author_str = entry.author.as_deref().unwrap_or("");
+						let heading_str = entry.heading_title.as_deref().unwrap_or("");
+						if !author_str.is_empty() || !heading_str.is_empty() {
+							print!("  --- ");
 							if !author_str.is_empty() {
-								print!(" | ");
+								print!("{}", author_str);
 							}
-							print!("{}", heading_str);
+							if !heading_str.is_empty() {
+								if !author_str.is_empty() {
+									print!(" | ");
+								}
+								print!("{}", heading_str);
+							}
+							println!(" ---");
 						}
-						println!(" ---");
+						for line in entry.body.lines() {
+							println!("  {}", line);
+						}
+						println!();
 					}
-					for line in entry.body.lines() {
-						println!("  {}", line);
-					}
-					println!();
 				}
 			}
 		}
@@ -272,7 +293,9 @@ fn main() -> Result<()> {
 			let query_embedding = ollama.embed(&query, &embed_model)?;
 			let results = storage::find_similar_chunks(&connection, &query_embedding, 10)?;
 
-			if results.is_empty() {
+			if json_output {
+				println!("{}", serde_json::to_string_pretty(&results)?);
+			} else if results.is_empty() {
 				println!("no results");
 			} else {
 				for result in &results {
@@ -298,7 +321,12 @@ fn main() -> Result<()> {
 			)?;
 
 			if derive_status_only {
-				derive::run_status(&connection)?;
+				if json_output {
+					let status = storage::get_derive_status(&connection)?;
+					println!("{}", serde_json::to_string_pretty(&status)?);
+				} else {
+					derive::run_status(&connection)?;
+				}
 				return Ok(());
 			}
 
@@ -311,6 +339,41 @@ fn main() -> Result<()> {
 				bad_brief: derive_bad_brief,
 				limit,
 			})?;
+		}
+		Some("get") => {
+			let id_str = positional
+				.get(1)
+				.context("get requires a document id")?;
+			let document_id: i64 = id_str.parse().context("get requires a numeric document id")?;
+			let doc = storage::get_document(&connection, document_id)?
+				.context(format!("no document with id {}", document_id))?;
+			if json_output {
+				println!("{}", serde_json::to_string_pretty(&doc)?);
+			} else {
+				println!("=== {} ===", doc.source_title);
+				println!("id: {}  doctype: {}  date: {}",
+					doc.id,
+					doc.doctype_name.as_deref().unwrap_or("unknown"),
+					doc.clip_date,
+				);
+				println!();
+				for entry in &doc.entries {
+					if let Some(heading) = &entry.heading_title {
+						println!("## {}", heading);
+					}
+					if let Some(author) = &entry.author {
+						print!("[{}]", author);
+						if let Some(ts) = &entry.timestamp {
+							print!(" {}", ts);
+						}
+						println!();
+					}
+					for line in entry.body.lines() {
+						println!("  {}", line);
+					}
+					println!();
+				}
+			}
 		}
 		Some("browse") | None => {
 			let filter = tui::GlobalFilter {

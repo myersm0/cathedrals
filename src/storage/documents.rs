@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 
 use crate::types::*;
 
@@ -115,6 +116,7 @@ pub fn chunk_count(connection: &Connection) -> Result<i64> {
 	Ok(connection.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?)
 }
 
+#[derive(Serialize)]
 pub struct DumpEntry {
 	pub body: String,
 	pub author: Option<String>,
@@ -122,6 +124,7 @@ pub struct DumpEntry {
 	pub position: u32,
 }
 
+#[derive(Serialize)]
 pub struct DumpDocument {
 	pub document_id: i64,
 	pub source_title: String,
@@ -249,7 +252,7 @@ pub fn list_documents(
 	Ok(results)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DocumentContent {
 	pub id: i64,
 	pub title: Option<String>,
@@ -259,7 +262,7 @@ pub struct DocumentContent {
 	pub entries: Vec<EntryContent>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EntryContent {
 	pub id: i64,
 	pub position: u32,
@@ -271,7 +274,7 @@ pub struct EntryContent {
 	pub chunks: Vec<ChunkContent>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChunkContent {
 	pub id: i64,
 	pub chunk_index: u32,
