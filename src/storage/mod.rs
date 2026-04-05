@@ -16,6 +16,7 @@ use rusqlite::Connection;
 use crate::types::MergeStrategy;
 
 pub fn initialize(connection: &Connection) -> Result<()> {
+	connection.execute_batch("PRAGMA journal_mode=WAL;")?;
 	connection.execute_batch(
 		"
 		CREATE TABLE IF NOT EXISTS documents (

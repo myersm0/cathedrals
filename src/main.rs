@@ -10,6 +10,7 @@ use cathedrals::llm::LlmBackend;
 use cathedrals::ollama::OllamaClient;
 use cathedrals::openai::OpenAiClient;
 use cathedrals::storage::{self, SearchSortColumn};
+use cathedrals::serve;
 use cathedrals::tui;
 use cathedrals::util;
 
@@ -87,6 +88,12 @@ enum Command {
 
 	/// Show database statistics
 	Stats,
+
+	/// Start JSON API server
+	Serve {
+		#[arg(long, default_value = "3030", help = "Port to listen on")]
+		port: u16,
+	},
 
 	/// Compute embeddings for chunks
 	Embed {
@@ -384,6 +391,10 @@ fn main() -> Result<()> {
 					println!();
 				}
 			}
+		}
+		Some(Command::Serve { port }) => {
+			let backend = create_backend(&backend_name, &ollama_url)?;
+			serve::run(connection, backend, embed_model, port)?;
 		}
 		Some(Command::Browse { tags, exclude, include_all }) => {
 			let backend = create_backend(&backend_name, &ollama_url)?;

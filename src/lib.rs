@@ -7,6 +7,7 @@ pub mod minhash;
 pub mod markdown;
 pub mod ollama;
 pub mod openai;
+pub mod serve;
 pub mod storage;
 pub mod ingest;
 pub mod util;
