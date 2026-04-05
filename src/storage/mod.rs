@@ -27,7 +27,8 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			doctype_name TEXT,
 			merge_strategy TEXT NOT NULL CHECK (merge_strategy IN ('none', 'positional', 'timestamped')),
 			origin_path TEXT,
-			clip_date TEXT NOT NULL
+			clip_date TEXT NOT NULL,
+			document_minhash BLOB
 		);
 
 		CREATE TABLE IF NOT EXISTS entries (
@@ -147,6 +148,16 @@ fn migrate(connection: &Connection) -> Result<()> {
 		)?;
 		connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 	}
+	let doc_sql: String = connection.query_row(
+		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'",
+		[],
+		|row| row.get(0),
+	)?;
+	if !doc_sql.contains("document_minhash") {
+		connection.execute_batch(
+			"ALTER TABLE documents ADD COLUMN document_minhash BLOB;",
+		)?;
+	}
 	let orphaned_entries: i64 = connection.query_row(
 		"SELECT COUNT(*) FROM entries WHERE document_id NOT IN (SELECT id FROM documents)",
 		[],
@@ -211,7 +222,7 @@ mod tests {
 		let hash = minhash::minhash(body);
 		let doc_id = insert_document(
 			connection, None, title, Some("test"), MergeStrategy::None,
-			Some("/test"), "2024-01-01 00:00:00",
+			Some("/test"), "2024-01-01 00:00:00", None,
 		).unwrap();
 		let entry_id = insert_entry(
 			connection, doc_id, &entry, 0, title,
@@ -400,12 +411,12 @@ mod tests {
 		let hash = minhash::minhash("content");
 
 		let doc1 = insert_document(
-			&db, None, "Beta", Some("test"), MergeStrategy::None, None, "2024-01-01 00:00:00",
+			&db, None, "Beta", Some("test"), MergeStrategy::None, None, "2024-01-01 00:00:00", None,
 		).unwrap();
 		insert_entry(&db, doc1, &entry, 0, "Beta", "2024-01-01 00:00:00", "/a", &hash).unwrap();
 
 		let doc2 = insert_document(
-			&db, None, "Alpha", Some("test"), MergeStrategy::None, None, "2024-06-01 00:00:00",
+			&db, None, "Alpha", Some("test"), MergeStrategy::None, None, "2024-06-01 00:00:00", None,
 		).unwrap();
 		insert_entry(&db, doc2, &entry, 0, "Alpha", "2024-06-01 00:00:00", "/b", &hash).unwrap();
 

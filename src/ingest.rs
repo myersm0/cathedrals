@@ -310,6 +310,8 @@ pub fn parse_copilot_email_summary(text: &str) -> Vec<SegmentedEntry> {
 }
 
 const merge_min_chars: usize = 150;
+const dup_jaccard_threshold: f64 = 0.7;
+const dup_window_days: i64 = 180;
 
 fn find_overlap(
 	existing: &[storage::ExistingEntry],
@@ -534,6 +536,18 @@ pub fn ingest_file(
 		}
 	}
 
+	let doc_hash = minhash::minhash_document(&segmented);
+
+	let candidates = storage::find_dup_candidates(connection, &clip_date_str, dup_window_days)?;
+	let mut superseded_doc: Option<(i64, String, f64)> = None;
+	for candidate in &candidates {
+		let sim = minhash::jaccard(&doc_hash, &candidate.document_minhash);
+		if sim >= dup_jaccard_threshold {
+			superseded_doc = Some((candidate.id, candidate.source_title.clone(), sim));
+			break;
+		}
+	}
+
 	let transaction = connection.unchecked_transaction()?;
 
 	let document_id = storage::insert_document(
@@ -544,6 +558,7 @@ pub fn ingest_file(
 		merge_strategy,
 		Some(&file_path_str),
 		&clip_date_str,
+		Some(&doc_hash),
 	)?;
 
 	let mut total_chunks = 0usize;
@@ -563,6 +578,14 @@ pub fn ingest_file(
 		let chunks = chunking::chunk_text(&entry.body);
 		storage::insert_chunks(&transaction, entry_id, &chunks)?;
 		total_chunks += chunks.len();
+	}
+
+	if let Some((old_id, ref old_title, sim)) = superseded_doc {
+		storage::add_tag(&transaction, old_id, "superseded")?;
+		eprintln!(
+			"  tagged doc {} \"{}\" as superseded (similarity: {:.2})",
+			old_id, old_title, sim,
+		);
 	}
 
 	transaction.commit()?;

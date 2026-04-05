@@ -12,10 +12,14 @@ pub fn insert_document(
 	merge_strategy: MergeStrategy,
 	origin_path: Option<&str>,
 	clip_date: &str,
+	document_minhash: Option<&MinHashSignature>,
 ) -> Result<DocumentId> {
+	let minhash_bytes: Option<Vec<u8>> = document_minhash.map(|sig| {
+		sig.iter().flat_map(|v| v.to_le_bytes()).collect()
+	});
 	connection.execute(
-		"INSERT INTO documents (title, source_title, doctype_name, merge_strategy, origin_path, clip_date)
-		 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+		"INSERT INTO documents (title, source_title, doctype_name, merge_strategy, origin_path, clip_date, document_minhash)
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
 		params![
 			title,
 			source_title,
@@ -23,6 +27,7 @@ pub fn insert_document(
 			super::merge_strategy_to_str(merge_strategy),
 			origin_path,
 			clip_date,
+			minhash_bytes,
 		],
 	)?;
 	Ok(DocumentId(connection.last_insert_rowid()))
@@ -416,6 +421,39 @@ pub fn update_document_clip_date(connection: &Connection, document_id: i64, clip
 		params![clip_date, document_id],
 	)?;
 	Ok(())
+}
+
+pub struct DupCandidate {
+	pub id: i64,
+	pub source_title: String,
+	pub document_minhash: MinHashSignature,
+}
+
+pub fn find_dup_candidates(
+	connection: &Connection,
+	clip_date: &str,
+	window_days: i64,
+) -> Result<Vec<DupCandidate>> {
+	let mut stmt = connection.prepare(
+		"SELECT id, source_title, document_minhash FROM documents
+		 WHERE document_minhash IS NOT NULL
+		 AND ABS(julianday(?1) - julianday(clip_date)) < ?2"
+	)?;
+	let results = stmt
+		.query_map(params![clip_date, window_days], |row| {
+			let id: i64 = row.get(0)?;
+			let source_title: String = row.get(1)?;
+			let blob: Vec<u8> = row.get(2)?;
+			let mut sig = [0u64; crate::types::MINHASH_SIZE];
+			for (i, chunk) in blob.chunks_exact(8).enumerate() {
+				if i < crate::types::MINHASH_SIZE {
+					sig[i] = u64::from_le_bytes(chunk.try_into().unwrap());
+				}
+			}
+			Ok(DupCandidate { id, source_title, document_minhash: sig })
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(results)
 }
 
 pub fn get_document_full_text(connection: &Connection, document_id: i64) -> Result<String> {

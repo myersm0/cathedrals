@@ -11,7 +11,8 @@ fn hash_with_seed(seed: usize, token: &str) -> u64 {
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-	text.split(|c: char| c.is_whitespace() || c == '\n')
+	let words: Vec<String> = text
+		.split(|c: char| c.is_whitespace() || c == '\n')
 		.map(|word| {
 			word.chars()
 				.filter(|c| c.is_alphanumeric())
@@ -19,6 +20,12 @@ fn tokenize(text: &str) -> Vec<String> {
 				.to_lowercase()
 		})
 		.filter(|word| !word.is_empty())
+		.collect();
+	if words.len() < 3 {
+		return words;
+	}
+	words.windows(3)
+		.map(|w| format!("{} {} {}", w[0], w[1], w[2]))
 		.collect()
 }
 
@@ -63,14 +70,22 @@ pub fn is_short_entry(text: &str) -> bool {
 	text.len() < 50
 }
 
+pub fn minhash_document(entries: &[crate::types::SegmentedEntry]) -> MinHashSignature {
+	let combined: String = entries.iter()
+		.map(|e| e.body.as_str())
+		.collect::<Vec<_>>()
+		.join("\n");
+	minhash(&combined)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[test]
 	fn identical_texts_have_jaccard_one() {
-		let a = minhash("the quick brown fox");
-		let b = minhash("the quick brown fox");
+		let a = minhash("the quick brown fox jumps over the lazy dog");
+		let b = minhash("the quick brown fox jumps over the lazy dog");
 		assert_eq!(jaccard(&a, &b), 1.0);
 	}
 
@@ -85,7 +100,7 @@ mod tests {
 	fn similar_texts_have_moderate_jaccard() {
 		let a = minhash("the quick brown fox jumps over the lazy dog");
 		let b = minhash("the quick brown fox leaps over the lazy dog");
-		assert!(jaccard(&a, &b) > 0.5);
+		assert!(jaccard(&a, &b) > 0.2);
 	}
 
 	#[test]
