@@ -16,22 +16,22 @@ static VEC_INIT: Once = Once::new();
 #[derive(Parser)]
 #[command(name = "cathedrals", about = "Personal knowledge base with full-text and semantic search")]
 struct Cli {
-	#[arg(long, value_name = "PATH", help = "Database path")]
+	#[arg(long, global = true, value_name = "PATH", help = "Database path")]
 	db: Option<PathBuf>,
 
-	#[arg(long, value_name = "PATH", help = "Config file path")]
+	#[arg(long, global = true, value_name = "PATH", help = "Config file path")]
 	config: Option<PathBuf>,
 
-	#[arg(long, default_value = "http://localhost:11434", help = "Ollama endpoint")]
+	#[arg(long, global = true, default_value = "http://localhost:11434", help = "Ollama endpoint")]
 	ollama: String,
 
-	#[arg(long, default_value = "mistral-nemo", help = "Ollama model for segmentation")]
+	#[arg(long, global = true, default_value = "mistral-nemo", help = "Ollama model for segmentation")]
 	model: String,
 
-	#[arg(long, default_value = "qwen3-embedding:8b", help = "Ollama model for embeddings")]
+	#[arg(long, global = true, default_value = "qwen3-embedding:8b", help = "Ollama model for embeddings")]
 	embed_model: String,
 
-	#[arg(long, help = "Output as JSON")]
+	#[arg(long, global = true, help = "Output as JSON")]
 	json: bool,
 
 	#[command(subcommand)]
