@@ -8,7 +8,7 @@ use crate::chunking;
 use crate::config::{self, Parser};
 use crate::markdown;
 use crate::minhash;
-use crate::ollama::OllamaClient;
+use crate::llm::LlmBackend;
 use crate::storage;
 use crate::types::*;
 use crate::util;
@@ -102,7 +102,8 @@ impl Default for SegmentationOptions {
 }
 
 pub fn segment(
-	client: &OllamaClient,
+	client: &dyn LlmBackend,
+	model: &str,
 	source_title: &str,
 	text: &str,
 	options: &SegmentationOptions,
@@ -126,7 +127,7 @@ pub fn segment(
 		system_prompt.push_str(doctype_prompt);
 	}
 
-	let response = client.generate(&prompt, &client.model, Some(&system_prompt), Some("json"))?;
+	let response = client.generate(&prompt, model, Some(&system_prompt), Some("json"))?;
 
 	let parsed: SegmentationJson = serde_json::from_str(&response)
 		.or_else(|_| {
@@ -358,7 +359,8 @@ fn find_overlap(
 
 pub fn ingest_file(
 	connection: &rusqlite::Connection,
-	ollama: &OllamaClient,
+	backend: &dyn LlmBackend,
+	model: &str,
 	file_path: &Path,
 	config: &config::Config,
 	force: bool,
@@ -436,7 +438,7 @@ pub fn ingest_file(
 			Parser::Markdown => markdown::parse_markdown_sections(&body),
 			Parser::CopilotEmail => parse_copilot_email_summary(&body),
 			Parser::Ollama => {
-				let result = segment(ollama, &source_title, &body, &segmentation_options)?;
+				let result = segment(backend, model, &source_title, &body, &segmentation_options)?;
 				result.entries
 			}
 			Parser::Whisper => {
@@ -576,7 +578,8 @@ pub fn ingest_file(
 
 pub fn ingest_directory(
 	connection: &rusqlite::Connection,
-	ollama: &OllamaClient,
+	backend: &dyn LlmBackend,
+	model: &str,
 	directory: &Path,
 	config: &config::Config,
 	force: bool,
@@ -597,7 +600,7 @@ pub fn ingest_directory(
 	eprintln!("found {} files in {}", paths.len(), directory.display());
 
 	for path in &paths {
-		match ingest_file(connection, ollama, path, config, force) {
+		match ingest_file(connection, backend, model, path, config, force) {
 			Ok(true) => ingested += 1,
 			Ok(false) => skipped += 1,
 			Err(error) => eprintln!("error ingesting {}: {:#}", path.display(), error),

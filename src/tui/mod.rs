@@ -295,17 +295,14 @@ pub struct GlobalFilter {
 	pub include_all: bool,
 }
 
-pub struct SearchConfig {
-	pub ollama_url: String,
+pub struct SearchConfig<'a> {
 	pub embed_model: String,
+	pub backend: &'a dyn crate::llm::LlmBackend,
 }
 
-impl Default for SearchConfig {
+impl Default for SearchConfig<'_> {
 	fn default() -> Self {
-		SearchConfig {
-			ollama_url: "http://localhost:11434".to_string(),
-			embed_model: "qwen3-embedding:8b".to_string(),
-		}
+		panic!("SearchConfig requires an explicit backend")
 	}
 }
 

@@ -9,7 +9,6 @@ use ratatui::{
 };
 use rusqlite::Connection;
 
-use crate::ollama::OllamaClient;
 use crate::storage::{self, GroupedSearchResult, SearchSortColumn};
 use crate::util::truncate_str;
 use super::{App, Mode, SearchConfig, SearchField, SearchMode};
@@ -125,8 +124,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 				return Ok(());
 			}
 
-			let client = OllamaClient::new(&search_config.ollama_url, "");
-			let query_embedding = match client.embed(&app.search_query, &search_config.embed_model) {
+			let query_embedding = match search_config.backend.embed(&app.search_query, &search_config.embed_model) {
 				Ok(emb) => emb,
 				Err(e) => {
 					app.status_message = Some(format!("Embed error: {}", e));

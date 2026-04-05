@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::llm::LlmBackend;
+
 #[derive(Serialize)]
 struct GenerateRequest {
 	model: String,
@@ -29,24 +31,24 @@ struct EmbeddingResponse {
 }
 
 pub struct OllamaClient {
-	pub base_url: String,
-	pub model: String,
+	base_url: String,
 	client: reqwest::blocking::Client,
 }
 
 impl OllamaClient {
-	pub fn new(base_url: &str, model: &str) -> Self {
+	pub fn new(base_url: &str) -> Self {
 		OllamaClient {
 			base_url: base_url.to_string(),
-			model: model.to_string(),
 			client: reqwest::blocking::Client::builder()
 				.timeout(std::time::Duration::from_secs(600))
 				.build()
 				.expect("failed to build http client"),
 		}
 	}
+}
 
-	pub fn generate(
+impl LlmBackend for OllamaClient {
+	fn generate(
 		&self,
 		prompt: &str,
 		model: &str,
@@ -71,11 +73,7 @@ impl OllamaClient {
 		Ok(response.response)
 	}
 
-	pub fn chat(&self, prompt: &str, model: &str) -> Result<String> {
-		self.generate(prompt, model, None, None)
-	}
-
-	pub fn embed(&self, text: &str, model: &str) -> Result<Vec<f32>> {
+	fn embed(&self, text: &str, model: &str) -> Result<Vec<f32>> {
 		let request = EmbeddingRequest {
 			model: model.to_string(),
 			prompt: text.to_string(),

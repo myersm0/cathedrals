@@ -2,7 +2,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::config::DeriveConfig;
-use crate::ollama::OllamaClient;
+use crate::llm::LlmBackend;
 use crate::storage;
 use crate::util;
 
@@ -29,7 +29,7 @@ pub fn run_status(connection: &Connection) -> Result<()> {
 
 pub fn run(
 	connection: &Connection,
-	ollama: &OllamaClient,
+	backend: &dyn LlmBackend,
 	derive_config: &DeriveConfig,
 	options: &DeriveOptions,
 ) -> Result<()> {
@@ -79,11 +79,11 @@ pub fn run(
 		);
 
 		let (detailed_body, content_len) = derive_detailed(
-			connection, ollama, derive_config, *doc_id, options.force, options.stale,
+			connection, backend, derive_config, *doc_id, options.force, options.stale,
 		)?;
 
 		derive_brief(
-			connection, ollama, derive_config, *doc_id,
+			connection, backend, derive_config, *doc_id,
 			&detailed_body, content_len, options.force,
 		)?;
 	}
@@ -94,7 +94,7 @@ pub fn run(
 
 fn derive_detailed(
 	connection: &Connection,
-	ollama: &OllamaClient,
+	backend: &dyn LlmBackend,
 	config: &DeriveConfig,
 	doc_id: i64,
 	force: bool,
@@ -122,7 +122,7 @@ fn derive_detailed(
 
 	let prompt = config.get_detailed_prompt(content_len);
 	let full_prompt = format!("{}\n{}", prompt, full_text);
-	let response = ollama.chat(&full_prompt, &config.detailed_model)?;
+	let response = backend.chat(&full_prompt, &config.detailed_model)?;
 	let source_hash = storage::compute_document_source_hash(connection, doc_id)?;
 
 	if let Some(row) = existing {
@@ -142,7 +142,7 @@ fn derive_detailed(
 
 fn derive_brief(
 	connection: &Connection,
-	ollama: &OllamaClient,
+	backend: &dyn LlmBackend,
 	config: &DeriveConfig,
 	doc_id: i64,
 	detailed_body: &str,
@@ -168,7 +168,7 @@ fn derive_brief(
 	} else {
 		let brief_prompt = config.get_brief_prompt();
 		let full_prompt = format!("{}\n{}", brief_prompt, detailed_body);
-		ollama.chat(&full_prompt, &config.brief_model)?
+		backend.chat(&full_prompt, &config.brief_model)?
 	};
 
 	let parent_id = storage::get_derived_content(connection, doc_id, "detailed")?
