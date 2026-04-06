@@ -40,6 +40,9 @@ struct Cli {
 	#[arg(long, global = true, help = "Output as JSON")]
 	json: bool,
 
+	#[arg(long, global = true, help = "TUI theme (dracula, gruvbox, nord, solarized, light, or path)")]
+	theme: Option<String>,
+
 	#[command(subcommand)]
 	command: Option<Command>,
 }
@@ -407,7 +410,7 @@ fn main() -> Result<()> {
 				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),
 			};
-			tui::run(&connection, filter, search_config, None)?;
+			tui::run(&connection, filter, search_config, cli.theme.as_deref())?;
 		}
 		None => {
 			let backend = create_backend(&backend_name, &ollama_url)?;
@@ -420,7 +423,7 @@ fn main() -> Result<()> {
 				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),
 			};
-			tui::run(&connection, filter, search_config, None)?;
+			tui::run(&connection, filter, search_config, cli.theme.as_deref())?;
 		}
 	}
 

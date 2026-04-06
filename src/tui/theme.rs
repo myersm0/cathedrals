@@ -146,7 +146,7 @@ fn themes_dir() -> PathBuf {
 }
 
 pub fn load_theme(name: Option<&str>) -> Theme {
-	let name = name.unwrap_or("gruvbox");
+	let name = name.unwrap_or("dracula");
 
 	if let Some(text) = builtin_theme(name) {
 		if let Ok(theme) = Theme::load(text) {
@@ -168,6 +168,6 @@ pub fn load_theme(name: Option<&str>) -> Theme {
 		}
 	}
 
-	Theme::load(builtin_theme("gruvbox").unwrap())
-		.expect("built-in gruvbox theme must be valid")
+	Theme::load(builtin_theme("dracula").unwrap())
+		.expect("built-in dracula theme must be valid")
 }
