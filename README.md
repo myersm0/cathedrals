@@ -39,6 +39,11 @@ commonplace ingest ~/inbox/clips/
 
 # Browse collection
 commonplace browse
+commonplace browse --theme gruvbox
+
+# Use a different TUI theme
+commonplace --theme nord
+commonplace --theme ~/my-custom-theme.toml
 
 # Search from CLI
 commonplace search "keyword query"
@@ -70,6 +75,8 @@ commonplace derive --status --json
 # Use OpenAI-compatible backend
 commonplace --backend openai --embed-model text-embedding-3-small similar "query"
 ```
+
+Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
 ## API Server
 
@@ -124,7 +131,7 @@ The source line is matched against doctype patterns in `config.toml` to determin
 - `b` / `Esc` — back to browse
 
 **Search mode**
-- `F2` — toggle FTS5 / Semantic
+- `` ` `` — toggle FTS5 / Semantic
 - `Tab` / `Shift-Tab` — cycle filter fields (query, author, date range)
 - `↑↓` — navigate results
 - `Enter` — open result
@@ -136,6 +143,23 @@ The source line is matched against doctype patterns in `config.toml` to determin
 - `y` — copy summary
 - `x` — mark as bad (for regeneration)
 - `Esc` — close
+
+## TUI Themes
+
+The TUI supports color themes via `--theme`:
+
+```bash
+commonplace --theme dracula    # default
+commonplace --theme gruvbox
+commonplace --theme nord
+commonplace --theme solarized
+commonplace --theme light
+commonplace --theme ~/mytheme.toml
+```
+
+Built-in themes are compiled into the binary. Custom themes can be placed in the config directory (`~/.config/commonplace/themes/` on Linux, `~/Library/Application Support/commonplace/themes/` on macOS) and referenced by name.
+
+Theme files are TOML with hex color values for semantic slots (background, text, borders, highlights, etc.). See any built-in theme in `src/tui/themes/` for the format.
 
 ## Key Concepts
 
@@ -178,7 +202,7 @@ project = "green"
 reference = "blue"
 ```
 
-Available colors: red, green, blue, cyan, magenta, yellow, white, gray, light_red, light_green, light_blue, light_cyan, light_magenta, light_yellow.
+Available colors: red, green, blue, cyan, magenta, yellow, white, gray, light_red, light_green, light_blue, light_cyan, light_magenta, light_yellow, or hex values like `"#FF5733"`.
 
 See `DEVELOPMENT.md` for architecture details.
 

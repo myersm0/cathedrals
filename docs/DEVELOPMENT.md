@@ -1,4 +1,4 @@
-# Cathedrals Development Guide
+# Commonplace Development Guide
 
 Personal knowledge base for clipped documents with full-text and semantic search.
 
@@ -78,7 +78,7 @@ CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec e
 
 Subcommands: ingest, search, similar, get, dump, stats, embed, derive, serve, browse (default).
 
-Global flags: `--db`, `--config`, `--ollama`, `--model`, `--embed-model`, `--backend`, `--json`.
+Global flags: `--db`, `--config`, `--ollama`, `--model`, `--embed-model`, `--backend`, `--theme`, `--json`.
 
 ### llm.rs
 `LlmBackend` trait defining the interface for LLM providers:
@@ -188,6 +188,7 @@ Key output types (`GroupedSearchResult`, `ChunkHit`, `SimilarChunk`, `DumpDocume
 Shared string utilities.
 
 - `strip_source_suffix()`: Removes browser names, URLs from source titles. Used for both merge key matching and TUI group navigation.
+- `extract_group_key()`: Derives a grouping key from a source title by stripping suffixes and filtering out generic names. Used for multi-document navigation in the TUI read view.
 - `normalize_to_ascii()`: Converts curly quotes, em-dashes, ellipsis to ASCII equivalents.
 - `truncate_str()`: Char-boundary-safe string truncation.
 - `strip_fts_markers()`: Removes FTS5 snippet highlight control characters (`\x01`, `\x02`, `\x03`) for clean JSON output.
@@ -200,19 +201,21 @@ Strategy: Sliding window of ~300 words with 1/3 stride. Snaps boundaries to sent
 ### tui/
 Ratatui-based terminal UI. Split into submodules with a shared `App` struct in `mod.rs`. Each mode has a key handler and draw function; the event loop dispatches based on `app.mode`.
 
-**mod.rs**: App struct (all state), enums (Mode, SearchMode, SearchField, SummaryType), shared methods (load_documents, filtered_documents, navigate_group, etc.), `run()`/`run_app()` event loop, `draw()` dispatcher. `SearchConfig` holds a `&dyn LlmBackend` reference and `embed_model` string.
+**mod.rs**: App struct (all state), enums (Mode, SearchMode, SearchField, SummaryType), shared methods (load_documents, filtered_documents, load_document_for_reading, navigate_group, etc.), `run()`/`run_app()` event loop, `draw()` dispatcher, `entry_chunk_count()`/`document_chunk_count()` helpers. `SearchConfig` holds a `&dyn LlmBackend` reference and `embed_model` string.
 
-**browse.rs**: Browse mode — document list with sorting, filtering, tag color markers, brief summary preview.
+**theme.rs**: Theme system. `Theme` struct with 19 semantic color slots (background, text hierarchy, borders, highlights, etc.), hex (`#RRGGBB`) and named color parsing, TOML loading. Five built-in themes compiled via `include_str!` (dracula, gruvbox, nord, solarized, light). Resolution order: builtin name → absolute path → config dir themes folder → fallback to dracula.
 
-**read.rs**: Read mode — view document content, navigate chunks, yank to clipboard, group navigation.
+**browse.rs**: Browse mode — document list with sorting, filtering, tag color markers, brief summary preview. Centered vertical scrolling.
 
-**search.rs**: Search mode — FTS5 or semantic search with author/date filters, F2 mode toggle, search execution. Uses `search_config.backend.embed()` for semantic queries.
+**read.rs**: Read mode — view document content, navigate chunks, yank to clipboard, group navigation. Skips empty-body entries during chunk navigation.
+
+**search.rs**: Search mode — FTS5 or semantic search (semantic by default) with author/date filters, backtick mode toggle, search execution. Uses `search_config.backend.embed()` for semantic queries.
 
 **tags.rs**: TagEdit and TagFilter modes — add/remove tags, filter document list by tag.
 
 **summary.rs**: SummaryView mode — popup for viewing/toggling brief/detailed summaries, copy, mark bad.
 
-**render.rs**: Shared rendering — markdown line/inline parsing, table alignment, snippet parsing with match highlighting, color parsing, status bar, `extract_group_key`.
+**render.rs**: Shared rendering — status bar with key binding highlighting, markdown line/inline parsing, table alignment, snippet parsing with match highlighting, centered rect utility.
 
 ### types.rs
 Shared type definitions: `DocumentId`, `EntryId`, `MediaId`, `SegmentedEntry`, `SegmentationResult`, `MergeStrategy`, `MediaItem`, `MediaType`, `MinHashSignature`.
@@ -278,7 +281,7 @@ reference = "blue"
 
 - `[defaults].exclude`: Tags filtered out by default (override with `--include-all`)
 - `[includes]`: Parent tags that match documents tagged with any child
-- `[colors]`: Tag color for browse view markers
+- `[colors]`: Tag color for browse view markers (named colors or hex `#RRGGBB`)
 
 ### derive.toml
 
@@ -400,6 +403,8 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 10. **Foreign key enforcement**: `PRAGMA foreign_keys = ON` set on every connection. All parent-child relationships use `ON DELETE CASCADE`. A migration system in `initialize()` detects old schemas and rebuilds tables as needed, preventing orphaned rows.
 
 11. **Near-duplicate detection via MinHash**: Documents are fingerprinted at ingest using 3-word shingle MinHash signatures. New documents are compared against existing docs within a configurable time window (default ±180 days). Near-duplicates are ingested normally but the older version is tagged `superseded`, preserving both versions while flagging staleness.
+
+12. **Themeable TUI via semantic color slots**: All TUI colors are driven by a `Theme` struct with named semantic slots (background, text, text_muted, highlight_bg, heading, code, etc.) rather than hardcoded terminal colors. Themes are TOML files with hex color values. Five built-in themes are compiled into the binary; custom themes can be loaded from the config directory or an absolute path. Tag colors remain user-configured independently of the theme.
 
 ## Adding a New CLI Command
 
