@@ -140,6 +140,22 @@ fn find_sentence_boundaries(text: &str) -> Vec<usize> {
 		}
 	}
 
+	let bytes = text.as_bytes();
+	let mut position = 0;
+	while position < bytes.len() {
+		if bytes[position] == b'\n' {
+			let mut scan = position + 1;
+			while scan < bytes.len() && bytes[scan] != b'\n' && bytes[scan].is_ascii_whitespace() {
+				scan += 1;
+			}
+			if scan < bytes.len() && bytes[scan] == b'\n' {
+				let boundary = scan + 1;
+				boundaries.push(boundary.min(bytes.len()));
+			}
+		}
+		position += 1;
+	}
+
 	boundaries.push(text.len());
 	boundaries.sort();
 	boundaries.dedup();
