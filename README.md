@@ -1,10 +1,51 @@
 # Commonplace
 
-A personal knowledge base for notes and documents. Stores web clips, notes, whisper-transcribed voice memos, emails, papers, etc, in SQLite with full-text and semantic search.
+A system for collecting, structuring, and querying personal text: emails, Slack threads, notes, web clips, transcripts, papers, etc.
 
-***Commonplace*** refers to the long tradition of the [commonplace book](https://en.wikipedia.org/wiki/Commonplace_book): a personal notebook used from the Renaissance through the nineteenth century to collect excerpts, observations, quotations, and ideas. This project follows in that tradition, but with a 21st-century twist to enable new capabilities like semantic search, automated information extraction, and temporal reasoning over documents in your collection.
+It does not just store documents. It parses them into structured units, tracks how they evolve over time, and makes them searchable lexically and semantically, with provenance preserved.
 
-Status: still in early development. Check back soon.
+Built on SQLite, FTS5, and [sqlite-vec](https://github.com/asg017/sqlite-vec), with optional LLM integration for embeddings, summaries, and information extraction.
+
+The name follows the tradition of the [commonplace book](https://en.wikipedia.org/wiki/Commonplace_book): a personal system for collecting excerpts, observations, and ideas. This project extends that idea into a computational system that can search, summarize, and reason over what you've collected.
+
+**Status:** usable but in early development, API subject to rapid change.
+
+---
+
+## What it does
+
+Commonplace turns raw text into a structured, queryable collection:
+
+- Ingests heterogeneous sources (notes, emails, Slack exports, transcripts, web clips, papers)
+- Segments them into entries (messages, paragraphs, sections) and chunks (~300-word fragments for indexing, with sentence-boundary snapping)
+- Extracts metadata (author, timestamp, hierarchy) when present in the source
+- Builds a full-text index (FTS5) and a semantic index (embeddings via sqlite-vec)
+- Tracks provenance at every level: document → entry → chunk
+- Detects near-duplicates at ingest time using MinHash over 3-word shingles
+- Merges growing conversation threads incrementally without duplication
+- Generates tiered LLM summaries (brief and detailed, with prompt selection by document length)
+
+Structured segmentation and metadata extraction for non-standard formats (e.g. proprietary email exports, internal Slack threads) require you to supply a custom preprocessor script. Commonplace calls this script during ingestion when one is configured for a doctype — the script is responsible for parsing the raw input and emitting the structured representation that Commonplace then ingests. See `DEVELOPMENT.md` and the `config.toml` doctype format for details.
+
+---
+
+## Key features
+
+**Structured ingestion** — Documents are parsed into entries and chunks, preserving authorship, timestamps, and hierarchy.
+
+**Incremental merging** — Conversation-like sources (Slack, email) grow over time. Commonplace detects overlap and appends new content without duplication.
+
+**Provenance-first** — Every piece of text is traceable to its source and position within the original document.
+
+**Hybrid search** — FTS5 keyword search for precision; embedding-based semantic search for recall.
+
+**Local-first** — SQLite + sqlite-vec. No external services required.
+
+**LLM integration** — Summaries, embeddings, and (in progress) structured claim extraction. Works with Ollama locally or any OpenAI-compatible API.
+
+**Terminal-native interface** — Fast TUI for browsing, reading, tagging, and searching your collection.
+
+---
 
 ## Installation
 
@@ -12,7 +53,7 @@ Status: still in early development. Check back soon.
 curl -fsSL https://raw.githubusercontent.com/myersm0/commonplace/main/install.sh | sh
 ```
 
-This downloads a prebuilt binary for your platform (Linux x86_64, macOS x86_64, macOS ARM) and installs it to `~/.local/bin/`.
+Installs a prebuilt binary to `~/.local/bin/` (Linux x86_64, macOS x86_64, macOS ARM).
 
 ### From source
 
@@ -25,131 +66,119 @@ cp target/release/commonplace ~/.local/bin/
 
 ### Requirements
 
-- [ollama](https://ollama.com) running locally for embeddings and LLM summaries (default backend)
-- Pull an embedding model: `ollama pull qwen3-embedding:8b`
-- Pull a summarization model: `ollama pull qwen2.5:32b` (or configure your preferred model in `derive.toml`)
+LLM features are optional but recommended.
 
-Alternatively, use an OpenAI-compatible API by setting `OPENAI_API_KEY` (and optionally `OPENAI_API_BASE`) and passing `--backend openai`.
-
-## Quick Reference
+**Local (default):**
 
 ```bash
-# Ingest new clips from inbox
-commonplace ingest ~/inbox/clips/
+# Install Ollama, then pull models
+ollama pull qwen3-embedding:8b
+ollama pull qwen2.5:32b        # or configure your preferred model in derive.toml
+```
 
-# Browse collection
+**Remote (OpenAI-compatible):**
+
+```bash
+export OPENAI_API_KEY=...
+commonplace --backend openai ...
+```
+
+---
+
+## Quick reference
+
+**Ingest**
+```bash
+commonplace ingest ~/inbox/clips/
+```
+
+**Browse and search**
+```bash
 commonplace browse
 commonplace browse --theme gruvbox
-
-# Use a different TUI theme
-commonplace --theme nord
-commonplace --theme ~/my-custom-theme.toml
-
-# Search from CLI
 commonplace search "keyword query"
 commonplace similar "semantic query"
-
-# Get a specific document
 commonplace get 42
+```
 
-# Generate LLM summaries
-commonplace derive              # missing only
-commonplace derive --force      # regenerate all
-commonplace derive --status     # check progress
+**Enrich**
+```bash
+commonplace embed              # compute embeddings
+commonplace derive             # generate summaries (missing only)
+commonplace derive --force     # regenerate all
+commonplace derive --status    # check progress
+```
 
-# Compute embeddings for semantic search
-commonplace embed
-
-# Start JSON API server
-commonplace serve               # default port 3030
+**Serve**
+```bash
+commonplace serve              # default port 3030
 commonplace serve --port 8080
+```
 
-# JSON output for scripting
+**JSON output (for scripting)**
+```bash
 commonplace search "query" --json
 commonplace similar "query" --json
 commonplace get 42 --json
 commonplace stats --json
 commonplace dump --json
 commonplace derive --status --json
-
-# Use OpenAI-compatible backend
-commonplace --backend openai --embed-model text-embedding-3-small similar "query"
 ```
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
-## API Server
+---
 
-`commonplace serve` starts a localhost JSON API for programmatic access. This is the agent-facing interface — holds the DB connection open and avoids per-call process spawn overhead.
+## Data model
 
-Endpoints:
+```
+Document → Entry → Chunk
+```
 
-- `GET /search?q=...&sort=score|date` — FTS5 keyword search, results grouped by document
-- `GET /similar?q=...&limit=N` — semantic search via embeddings (default limit 10)
-- `GET /get/:id` — full document with entries and chunks
-- `GET /entries/:doc_id` — entries for a document
-- `GET /stats` — database statistics
-- `GET /derive/status` — derivation progress
+- **Document** — a source (article, email thread, Slack conversation, voice memo)
+- **Entry** — a logical segment within a document (message, paragraph, section)
+- **Chunk** — ~300-word fragment used for indexing; boundaries snap to sentence ends (500-char max snap distance)
 
-All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes.
+Search operates at the chunk level for precision. Results are grouped and presented at the document level for context.
 
-## File Format
+---
 
-Clips are text files with a `# source:` header line:
+## File format
+
+Clips are plain text files with a `# source:` header:
 
 ```
 # source: Article Title - Website Name - Browser
-Clipped content goes here...
+Content goes here...
 ```
 
-The source line is matched against doctype patterns in `config.toml` to determine parsing strategy.
+The source line is matched against doctype patterns in `config.toml` to determine parsing behavior.
 
-## TUI Keybindings
+---
 
-**Browse mode**
-- `↑↓` / `g` / `G` — navigate
-- `Enter` — open document
-- `/` — search
-- `m` — mark document (for multi-doc navigation)
-- `M` — clear marks
-- `d` — view brief summary
-- `f` — filter by tag
-- `F` — clear tag filter
-- `s` — cycle sort column
-- `S` — toggle sort direction
-- `q` — quit
+## API server
 
-**Read mode**
-- `↑↓` / `g` / `G` — navigate chunks
-- `PgUp` / `PgDn` — jump 5 chunks
-- `←→` — navigate within group (same source title)
-- `d` — view detailed summary
-- `t` — add/remove tags
-- `y` — yank current chunk
-- `Y` — yank full document
-- `/` — search
-- `b` / `Esc` — back to browse
+`commonplace serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead.
 
-**Search mode**
-- `` ` `` — toggle FTS5 / Semantic
-- `Tab` / `Shift-Tab` — cycle filter fields (query, author, date range)
-- `↑↓` — navigate results
-- `Enter` — open result
-- `Esc` — back
+| Endpoint | Description |
+|---|---|
+| `GET /search?q=...&sort=score\|date` | FTS5 keyword search, results grouped by document |
+| `GET /similar?q=...&limit=N` | Semantic search via embeddings (default limit 10) |
+| `GET /get/:id` | Full document with entries and chunks |
+| `GET /entries/:doc_id` | Entries for a document |
+| `GET /stats` | Database statistics |
+| `GET /derive/status` | Derivation progress |
 
-**Summary popup**
-- `↑↓` — scroll
-- `d` — toggle brief/detailed
-- `y` — copy summary
-- `x` — mark as bad (for regeneration)
-- `Esc` — close
+All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes.
 
-## TUI Themes
+---
 
-The TUI supports color themes via `--theme`:
+## TUI
+
+### Themes
 
 ```bash
-commonplace --theme dracula    # default
+commonplace --theme dracula      # default
 commonplace --theme gruvbox
 commonplace --theme nord
 commonplace --theme solarized
@@ -157,37 +186,81 @@ commonplace --theme light
 commonplace --theme ~/mytheme.toml
 ```
 
-Built-in themes are compiled into the binary. Custom themes can be placed in the config directory (`~/.config/commonplace/themes/` on Linux, `~/Library/Application Support/commonplace/themes/` on macOS) and referenced by name.
+Built-in themes are compiled into the binary. Custom themes are TOML files with hex color values for semantic slots (background, text, borders, highlights, etc.) — see `src/tui/themes/` for the format. Custom themes can also live in `~/.config/commonplace/themes/` and be referenced by name.
 
-Theme files are TOML with hex color values for semantic slots (background, text, borders, highlights, etc.). See any built-in theme in `src/tui/themes/` for the format.
+### Keybindings
 
-## Key Concepts
+**Browse**
 
-**Doctype**: Parsing configuration matched by source title pattern or extension. Defines parser (whole, markdown, whisper, copilot_email, ollama), merge strategy, and optional preprocessor script.
+| Key | Action |
+|---|---|
+| `↑↓` / `g` / `G` | Navigate |
+| `Enter` | Open document |
+| `/` | Search |
+| `m` / `M` | Mark / clear marks |
+| `d` | Brief summary |
+| `f` / `F` | Filter by tag / clear |
+| `s` / `S` | Cycle sort / toggle direction |
+| `q` | Quit |
 
-**Merge strategy**: 
+**Read**
+
+| Key | Action |
+|---|---|
+| `↑↓` / `g` / `G` | Navigate chunks |
+| `PgUp` / `PgDn` | Jump 5 chunks |
+| `←→` | Navigate within group (same source title) |
+| `d` | Detailed summary |
+| `t` | Add/remove tags |
+| `y` / `Y` | Yank chunk / full document |
+| `/` | Search |
+| `b` / `Esc` | Back to browse |
+
+**Search**
+
+| Key | Action |
+|---|---|
+| `` ` `` | Toggle FTS5 / semantic |
+| `Tab` / `Shift-Tab` | Cycle filter fields |
+| `↑↓` | Navigate results |
+| `Enter` | Open result |
+| `Esc` | Back |
+
+**Summary popup**
+
+| Key | Action |
+|---|---|
+| `↑↓` | Scroll |
+| `d` | Toggle brief/detailed |
+| `y` | Copy summary |
+| `x` | Mark as bad (for regeneration) |
+| `Esc` | Close |
+
+---
+
+## Key concepts
+
+**Doctype** — Parsing configuration matched by source title pattern or extension. Defines the parser (whole, markdown, whisper, copilot_email, ollama), merge strategy, and optional preprocessor script.
+
+**Merge strategy**
 - `none` — each clip creates a new document
-- `positional` — clips with same source title are merged (for growing Slack threads, email chains)
+- `positional` — clips with the same source title are merged (for growing Slack threads, email chains)
 
-**Entries**: Segments within a document (messages, paragraphs, sections).
+**Derived content** — LLM-generated summaries stored alongside documents. A detailed summary is generated first (prompt tier selected by document length: short/medium/long), then a brief summary is compressed from it. For short documents the brief summary is copied directly without an extra LLM call.
 
-**Chunks**: ~300 word fragments of entries, indexed for search. Boundaries snap to sentence ends when possible, with a 500-char max snap distance to prevent degenerate behavior on text without sentence punctuation.
+**Near-duplicate detection** — Documents are fingerprinted at ingest time using MinHash over 3-word shingles. New documents are compared against existing documents within a ±180-day window. Jaccard similarity above 0.7 tags the older document as `superseded`; near-misses (0.4–0.7) are logged to stderr.
 
-**Derived content**: LLM-generated summaries stored alongside documents. A detailed summary is generated first (prompt tier selected by document length: short/medium/long), then a brief summary is compressed from it. For short documents, the brief summary is copied directly from the detailed summary without an extra LLM call.
+---
 
-**Near-duplicate detection**: Documents are fingerprinted at ingest time using MinHash over 3-word shingles. When a new document is ingested, it is compared against existing documents within a ±180 day window. If Jaccard similarity exceeds 0.7, the older document is tagged `superseded`. Near-misses (similarity 0.4–0.7) are logged to stderr.
+## Configuration
 
-## Config Files
+All config lives in `~/.config/commonplace/`:
 
-All in `~/.config/commonplace/`:
-
-- `config.toml` — doctype definitions
+- `config.toml` — doctype definitions and parsing rules
 - `tags.toml` — tag hierarchy, default exclusions, tag colors
-- `derive.toml` — LLM model selection, prompt thresholds
+- `derive.toml` — LLM model selection and prompt thresholds
 
-### Tag Colors
-
-Tags can be assigned colors in `tags.toml`, displayed as colored markers in the browse view:
+### Tag colors
 
 ```toml
 [defaults]
@@ -202,12 +275,47 @@ project = "green"
 reference = "blue"
 ```
 
-Available colors: red, green, blue, cyan, magenta, yellow, white, gray, light_red, light_green, light_blue, light_cyan, light_magenta, light_yellow, or hex values like `"#FF5733"`.
+Available colors: `red`, `green`, `blue`, `cyan`, `magenta`, `yellow`, `white`, `gray`, `light_red`, `light_green`, `light_blue`, `light_cyan`, `light_magenta`, `light_yellow`, or hex values like `"#FF5733"`.
 
-See `DEVELOPMENT.md` for architecture details.
+---
 
 ## Database
 
-SQLite at `~/.local/share/commonplace/commonplace.db` with WAL mode and foreign key enforcement enabled. All parent-child relationships (documents → entries → chunks) use `ON DELETE CASCADE`.
+SQLite at `~/.local/share/commonplace/commonplace.db`, with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
 
-To reset: delete the db file. To re-embed: drop the vec table (`DROP TABLE vec_chunks;`) then `commonplace embed`.
+**Reset:**
+```bash
+rm ~/.local/share/commonplace/commonplace.db
+```
+
+**Rebuild embeddings:**
+```sql
+DROP TABLE vec_chunks;
+```
+```bash
+commonplace embed
+```
+
+---
+
+## Roadmap
+
+**Claim extraction** *(in design)* — A `claims` table for LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, entry, author (when known), kind (observation, decision, result, recommendation, hypothesis, question, plan, limitation, method), and the model that produced it. Extraction strategy varies by doctype: whole-document for clips and papers, sliding-window over entries for long threads. Claims will be embedded for semantic search alongside chunks, and exposed via the `serve` API.
+
+**Temporal reasoning** — Structured reasoning over how documents and their claims evolve over time.
+
+**Cross-document linking** — Surfacing connections via semantic similarity across the collection.
+
+**LLM backend abstraction** — A clean trait interface for swapping backends (Ollama, OpenAI, others).
+
+**More expressive queries** — Structured filtering beyond keyword and semantic search.
+
+---
+
+## Development
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for architecture details and internal design.
+
+## License
+
+MIT
