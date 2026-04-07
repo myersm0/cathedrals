@@ -2,16 +2,34 @@
 
 Test data and parser scripts for Commonplace ingestion.
 
+## Quick start
+
+```bash
+# from the repo root
+pip install -r examples/parsers/requirements.txt
+
+commonplace --config examples ingest examples/inbox/email/
+commonplace --config examples ingest examples/inbox/slack/
+commonplace --config examples ingest examples/inbox/markdown/
+
+commonplace browse
+```
+
+The `--config examples` flag tells Commonplace to use `examples/` as the config directory, picking up `examples/config.toml` with the parser paths.
+
 ## Structure
 
 ```
 examples/
+├── config.toml     # doctype config wired to the example parsers
 ├── inbox/          # sample clips, organized by doctype
 │   ├── email/      # Outlook email chains (.txt)
 │   ├── markdown/   # markdown documents (.md)
 │   └── slack/      # Slack conversations (.txt)
 └── parsers/        # external preprocessor scripts
     ├── email_parser.py
+    ├── junk.txt
+    ├── requirements.txt
     └── slack_parser.py
 ```
 
@@ -36,7 +54,7 @@ python parsers/email_parser.py --check inbox/email/
 
 ### Markdown
 
-Parsed internally by Commonplace. Documents are segmented into entries by heading structure. No external preprocessor is needed.
+Parsed internally by Commonplace. Documents are segmented into entries by heading structure. Code-fence-aware: `#` lines inside fenced code blocks are not treated as headings. No external preprocessor is needed.
 
 ### Slack
 

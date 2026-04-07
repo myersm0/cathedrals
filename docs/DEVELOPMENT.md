@@ -74,11 +74,13 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 ## Module Responsibilities
 
 ### main.rs
-CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Contains `open_db()` for connection setup and `create_backend()` factory that returns `Box<dyn LlmBackend>` based on the `--backend` flag.
+CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Contains `open_db()` for connection setup and `create_backend()` factory that returns `Box<dyn LlmBackend>` based on `BackendConfig`.
+
+The `--config` flag specifies the config directory (default: `~/.config/commonplace/`). `BackendConfig` is loaded from `backend.toml` within this directory, with CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) as optional overrides. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
 
 Subcommands: ingest, search, similar, get, dump, stats, embed, derive, serve, browse (default).
 
-Global flags: `--db`, `--config`, `--ollama`, `--model`, `--embed-model`, `--backend`, `--theme`, `--json`.
+Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
 ### llm.rs
 `LlmBackend` trait defining the interface for LLM providers:
@@ -92,7 +94,12 @@ The trait requires `Send + Sync` for use in the async serve module.
 `OllamaClient` implementing `LlmBackend` via the Ollama HTTP API. Constructor takes just `base_url`; the model is passed per-call.
 
 ### openai.rs
-`OpenAiClient` implementing `LlmBackend` via the OpenAI chat completions and embeddings APIs. Reads `OPENAI_API_KEY` and optionally `OPENAI_API_BASE` from environment variables. Compatible with Azure OpenAI and other OpenAI-compatible endpoints.
+`OpenAiClient` implementing `LlmBackend` via the OpenAI chat completions and embeddings APIs. Supports two authentication strategies:
+
+- **API key** (`auth = "api_key"`): Reads `OPENAI_API_KEY` from environment. Compatible with standard OpenAI, Azure OpenAI, and other OpenAI-compatible endpoints.
+- **OAuth2 client credentials** (`auth = "oauth"`): Reads `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` from environment. Fetches bearer tokens from a configured token URL with a configured scope. Tokens are cached in a `Mutex<Option<CachedToken>>` (for `Send + Sync` compatibility) and refreshed automatically 60 seconds before expiry.
+
+The primary constructor is `from_config(&OpenAiConfig)`, taking its configuration from `backend.toml`. A convenience `from_env()` constructor remains for the plain API key case.
 
 Translates the `format: Some("json")` parameter to OpenAI's `response_format: {"type": "json_object"}`.
 
@@ -119,7 +126,7 @@ Key functions:
 - `derive_brief()`: Generates brief summary via LLM, or copies detailed directly for short documents (under `short_threshold`)
 
 ### config.rs
-Loads and parses `config.toml`, `tags.toml`, and `derive.toml`. Handles doctype detection.
+Loads and parses configuration files from the config directory. Handles doctype detection.
 
 **Doctype matching** (in order):
 1. `source_pattern` regex against source title
@@ -131,6 +138,12 @@ Key types:
 - `DoctypeMatch`: Result of detection, includes parser/preprocessor/merge_strategy
 - `TagConfig`: Tag hierarchy, default exclusions, color assignments
 - `DeriveConfig`: Model selection, prompt tiers, thresholds
+- `BackendConfig`: Backend selection, model defaults, OpenAI auth configuration
+- `BackendKind`: Enum (`Ollama`, `OpenAi`)
+- `OpenAiAuth`: Enum (`ApiKey`, `OAuth`)
+- `OpenAiConfig`: Base URL, auth strategy, OAuth token URL and scope
+
+`BackendConfig::load(config_dir)` reads `backend.toml` from the config directory, falling back to defaults (Ollama on localhost) if the file doesn't exist. `DeriveConfig::load(config_dir)` reads `derive.toml` similarly.
 
 ### ingest.rs
 Text parsing, segmentation, and ingestion orchestration. All public functions accept `&dyn LlmBackend` plus an explicit `model: &str` parameter.
@@ -189,14 +202,16 @@ Shared string utilities.
 
 - `strip_source_suffix()`: Removes browser names, URLs from source titles. Used for both merge key matching and TUI group navigation.
 - `extract_group_key()`: Derives a grouping key from a source title by stripping suffixes and filtering out generic names. Used for multi-document navigation in the TUI read view.
-- `normalize_to_ascii()`: Converts curly quotes, em-dashes, ellipsis to ASCII equivalents.
+- `normalize_to_ascii()`: Converts curly quotes, em-dashes, ellipsis to ASCII equivalents. Collapses whitespace (including non-breaking spaces).
 - `truncate_str()`: Char-boundary-safe string truncation.
 - `strip_fts_markers()`: Removes FTS5 snippet highlight control characters (`\x01`, `\x02`, `\x03`) for clean JSON output.
 
 ### chunking.rs
 Splits entry text into chunks for indexing.
 
-Strategy: Sliding window of ~300 words with 1/3 stride. Snaps boundaries to sentence ends within a max distance of 500 chars; falls back to word boundaries when no sentence punctuation is nearby. Entries under 400 words are kept as a single chunk. Remaining words below the split threshold are absorbed into the final chunk to avoid tiny trailing fragments.
+Strategy: Sliding window of ~300 words with 1/3 stride. Snaps boundaries to sentence ends and paragraph breaks within a max distance of 500 chars; falls back to word boundaries when no suitable boundary is nearby. Entries under 400 words are kept as a single chunk. Remaining words below the split threshold are absorbed into the final chunk to avoid tiny trailing fragments.
+
+Sentence boundaries are detected by terminal punctuation (`.!?` followed by whitespace) and paragraph breaks (`\n\n`, with optional intermediate whitespace). This ensures documents without terminal punctuation (lists, notes, bullet points) still get chunked at natural paragraph boundaries rather than producing oversized single chunks.
 
 ### tui/
 Ratatui-based terminal UI. Split into submodules with a shared `App` struct in `mod.rs`. Each mode has a key handler and draw function; the event loop dispatches based on `app.mode`.
@@ -231,7 +246,7 @@ Key functions:
 - `is_short_entry()`: Check if text is below 50 chars (used for short-entry handling)
 
 ### markdown.rs
-Markdown-specific parsing (heading extraction, section splitting).
+Markdown-specific parsing (heading extraction, section splitting). Tracks fenced code block state (```` ``` ```` and `~~~` delimiters) so that `#` comment lines inside code blocks are not misinterpreted as headings.
 
 ### whisper.rs
 VTT transcript parsing for Whisper output. Parses segments and converts to `MediaItem` list. Not yet wired into the ingestion pipeline.
@@ -263,6 +278,39 @@ cleanup_patterns = ["^\\s*:\\w+:\\s*$"]
 - `cleanup_patterns`: Regexes for lines to remove
 - `merge_consecutive_same_author`: Combine adjacent same-author entries
 - `prompt`: Custom prompt for ollama parser
+
+### backend.toml
+
+```toml
+backend = "openai"
+ollama_url = "http://localhost:11434"
+model = "gpt-4.1-mini"
+embed_model = "text-embedding-3-small"
+
+[openai]
+base_url = "https://api.openai.com/v1"
+auth = "oauth"
+oauth_token_url = "https://login.microsoftonline.com/.../oauth2/v2.0/token"
+oauth_scope = "api://.../.default"
+```
+
+**Fields**:
+- `backend`: `ollama` (default) or `openai`
+- `ollama_url`: Ollama endpoint (default: `http://localhost:11434`)
+- `model`: Default model for generation (overridden by `--model` CLI flag)
+- `embed_model`: Default model for embeddings (overridden by `--embed-model` CLI flag)
+
+**`[openai]` section**:
+- `base_url`: API endpoint (default: `https://api.openai.com/v1`)
+- `auth`: `api_key` (default) or `oauth`
+- `oauth_token_url`: OAuth2 token endpoint (required when `auth = "oauth"`)
+- `oauth_scope`: OAuth2 scope (required when `auth = "oauth"`)
+
+Environment variables:
+- `OPENAI_API_KEY`: Required when `auth = "api_key"`
+- `OAUTH2_CLIENT_ID`, `OAUTH2_CLIENT_SECRET`: Required when `auth = "oauth"`
+
+If `backend.toml` doesn't exist, defaults to Ollama on localhost with no file needed.
 
 ### tags.toml
 
@@ -324,6 +372,8 @@ Python scripts that parse format-specific content.
 Only `body` is required. Timestamps should be ISO 8601, normalized to UTC.
 
 **Invocation**: `python3 script.py /path/to/file.txt`
+
+See `examples/parsers/` for working email and Slack preprocessor scripts, and `examples/inbox/` for sample input documents.
 
 ## Ingestion Flow
 
@@ -394,7 +444,7 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 6. **Short-doc brief optimization**: Documents under the short threshold get their brief summary copied from the detailed output, saving an LLM round-trip on content that's already 1-2 sentences.
 
-7. **LLM backend abstraction**: `LlmBackend` trait with `OllamaClient` and `OpenAiClient` implementations, switchable via `--backend` flag. Enables use on machines without local Ollama (e.g., institutional OpenAI/Azure endpoints).
+7. **LLM backend abstraction**: `LlmBackend` trait with `OllamaClient` and `OpenAiClient` implementations. Backend selection and model defaults are configured in `backend.toml`, with CLI flags as overrides. `OpenAiClient` supports both static API keys and OAuth2 client credentials with automatic token refresh, enabling use on machines with institutional OpenAI endpoints.
 
 8. **WAL mode**: SQLite journal_mode=WAL set on initialization. Enables concurrent readers during serve mode without blocking on writes.
 
@@ -405,6 +455,10 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 11. **Near-duplicate detection via MinHash**: Documents are fingerprinted at ingest using 3-word shingle MinHash signatures. New documents are compared against existing docs within a configurable time window (default ±180 days). Near-duplicates are ingested normally but the older version is tagged `superseded`, preserving both versions while flagging staleness.
 
 12. **Themeable TUI via semantic color slots**: All TUI colors are driven by a `Theme` struct with named semantic slots (background, text, text_muted, highlight_bg, heading, code, etc.) rather than hardcoded terminal colors. Themes are TOML files with hex color values. Five built-in themes are compiled into the binary; custom themes can be loaded from the config directory or an absolute path. Tag colors remain user-configured independently of the theme.
+
+13. **Paragraph-aware chunking**: Chunk boundary detection recognizes both sentence-ending punctuation (`.!?`) and paragraph breaks (`\n\n`) as snap points. This prevents documents without terminal punctuation (bullet lists, notes, code-heavy content) from producing oversized single chunks.
+
+14. **Config-directory convention**: All configuration files (`config.toml`, `backend.toml`, `tags.toml`, `derive.toml`, themes) live in a single config directory (default `~/.config/commonplace/`), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
 
 ## Adding a New CLI Command
 
@@ -417,8 +471,9 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 1. Create a new module (e.g., `anthropic.rs`)
 2. Implement `LlmBackend` for your client struct
-3. Add a case to `create_backend()` in main.rs
-4. Add the module to `lib.rs`
+3. Add a variant to `BackendKind` in config.rs and handle it in `BackendConfig` deserialization
+4. Add a case to `create_backend()` in main.rs
+5. Add the module to `lib.rs`
 
 ## Common Maintenance Tasks
 

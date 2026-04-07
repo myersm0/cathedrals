@@ -20,7 +20,7 @@ The name follows the tradition of the [commonplace book](https://en.wikipedia.or
 Commonplace turns raw text into a structured, queryable collection:
 
 - Ingests heterogeneous sources (notes, emails, Slack exports, transcripts, web clips, papers)
-- Segments them into entries (messages, paragraphs, sections) and chunks (~300-word fragments for indexing, with sentence-boundary snapping)
+- Segments them into entries (messages, paragraphs, sections) and chunks (~300-word fragments for indexing, with sentence-boundary and paragraph-boundary snapping)
 - Extracts metadata (author, timestamp, hierarchy) when present in the source
 - Builds a full-text index (FTS5) and a semantic index (embeddings via sqlite-vec)
 - Tracks provenance at every level: document → entry → chunk
@@ -28,13 +28,13 @@ Commonplace turns raw text into a structured, queryable collection:
 - Merges growing conversation threads incrementally without duplication
 - Generates tiered LLM summaries (brief and detailed, with prompt selection by document length)
 
-Structured segmentation and metadata extraction for non-standard formats (e.g. proprietary email exports, internal Slack threads) require you to supply a custom preprocessor script. Commonplace calls this script during ingestion when one is configured for a doctype — the script is responsible for parsing the raw input and emitting the structured representation that Commonplace then ingests. See `DEVELOPMENT.md` and the `config.toml` doctype format for details.
+Structured segmentation and metadata extraction for non-standard formats (e.g. proprietary email exports, internal Slack threads) require you to supply a custom preprocessor script. Commonplace calls this script during ingestion when one is configured for a doctype — the script is responsible for parsing the raw input and emitting the structured representation that Commonplace then ingests. See `DEVELOPMENT.md` and the `config.toml` doctype format for details, and `examples/` for working preprocessor scripts.
 
 ---
 
 ## Key features
 
-**Structured ingestion** — Documents are parsed into entries and chunks, preserving authorship, timestamps, and hierarchy.
+**Structured ingestion** — Documents are parsed into entries and chunks, preserving authorship, timestamps, and hierarchy. Markdown parsing is code-fence-aware (comments inside fenced code blocks are not treated as headings).
 
 **Incremental merging** — Conversation-like sources (Slack, email) grow over time. Commonplace detects overlap and appends new content without duplication.
 
@@ -44,7 +44,7 @@ Structured segmentation and metadata extraction for non-standard formats (e.g. p
 
 **Local-first** — SQLite + sqlite-vec. No external services required.
 
-**LLM integration** — Summaries, embeddings, and (in progress) structured claim extraction. Works with Ollama locally or any OpenAI-compatible API.
+**LLM integration** — Summaries, embeddings, and (in progress) structured claim extraction. Works with Ollama locally or any OpenAI-compatible API, including endpoints secured with OAuth2 client credentials.
 
 **Terminal-native interface** — Fast TUI for browsing, reading, tagging, and searching your collection.
 
@@ -76,15 +76,23 @@ LLM features are optional but recommended.
 ```bash
 # Install Ollama, then pull models
 ollama pull qwen3-embedding:8b
-ollama pull qwen2.5:32b        # or configure your preferred model in derive.toml
+ollama pull qwen2.5:32b        # or configure your preferred model in backend.toml
 ```
 
 **Remote (OpenAI-compatible):**
 
+For standard OpenAI API key auth:
 ```bash
 export OPENAI_API_KEY=...
-commonplace --backend openai ...
 ```
+
+For OAuth2 client credentials (e.g. institutional Azure OpenAI endpoints):
+```bash
+export OAUTH2_CLIENT_ID=...
+export OAUTH2_CLIENT_SECRET=...
+```
+
+See [Configuration](#configuration) for `backend.toml` setup.
 
 ---
 
@@ -130,6 +138,26 @@ commonplace derive --status --json
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
+The `--config` flag specifies the config directory (default: `~/.config/commonplace/`). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `backend.toml`.
+
+---
+
+## Try it with example data
+
+The `examples/` directory contains sample documents, preprocessor scripts, and a config file. To ingest the demo data:
+
+```bash
+pip install -r examples/parsers/requirements.txt
+
+commonplace --config examples ingest examples/inbox/email/
+commonplace --config examples ingest examples/inbox/slack/
+commonplace --config examples ingest examples/inbox/markdown/
+
+commonplace browse
+```
+
+See `examples/README.md` for details on the example documents and parsers.
+
 ---
 
 ## Data model
@@ -140,7 +168,7 @@ Document → Entry → Chunk
 
 - **Document** — a source (article, email thread, Slack conversation, voice memo)
 - **Entry** — a logical segment within a document (message, paragraph, section)
-- **Chunk** — ~300-word fragment used for indexing; boundaries snap to sentence ends (500-char max snap distance)
+- **Chunk** — ~300-word fragment used for indexing; boundaries snap to sentence ends and paragraph breaks (500-char max snap distance)
 
 Search operates at the chunk level for precision. Results are grouped and presented at the document level for context.
 
@@ -257,11 +285,50 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 ## Configuration
 
-All config lives in `~/.config/commonplace/`:
+All config lives in `~/.config/commonplace/` (override with `--config`):
 
 - `config.toml` — doctype definitions and parsing rules
+- `backend.toml` — LLM backend selection, model defaults, and authentication
 - `tags.toml` — tag hierarchy, default exclusions, tag colors
-- `derive.toml` — LLM model selection and prompt thresholds
+- `derive.toml` — LLM prompt thresholds and model overrides for summary generation
+
+### backend.toml
+
+Selects the LLM backend and provides model defaults. CLI flags (`--backend`, `--model`, `--embed-model`, `--ollama`) override these values when provided.
+
+**Ollama (default, no file needed):**
+```toml
+backend = "ollama"
+ollama_url = "http://localhost:11434"
+model = "qwen2.5:32b"
+embed_model = "qwen3-embedding:8b"
+```
+
+**OpenAI with API key:**
+```toml
+backend = "openai"
+model = "gpt-4.1-mini"
+embed_model = "text-embedding-3-small"
+
+[openai]
+base_url = "https://api.openai.com/v1"
+auth = "api_key"
+```
+Reads `OPENAI_API_KEY` from the environment.
+
+**OpenAI with OAuth2 (institutional endpoints):**
+```toml
+backend = "openai"
+model = "gpt-4.1-mini"
+embed_model = "text-embedding-3-small"
+
+[openai]
+base_url = "https://api.openai.wustl.edu/models/v1"
+auth = "oauth"
+oauth_token_url = "https://login.microsoftonline.com/.../oauth2/v2.0/token"
+oauth_scope = "api://.../.default"
+```
+Reads `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` from the environment. Tokens are cached and refreshed automatically before expiry.
 
 ### Tag colors
 
@@ -308,8 +375,6 @@ commonplace embed
 **Temporal reasoning** — Structured reasoning over how documents and their claims evolve over time.
 
 **Cross-document linking** — Surfacing connections via semantic similarity across the collection.
-
-**LLM backend abstraction** — A clean trait interface for swapping backends (Ollama, OpenAI, others).
 
 **More expressive queries** — Structured filtering beyond keyword and semantic search.
 
