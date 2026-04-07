@@ -310,7 +310,7 @@ pub fn parse_copilot_email_summary(text: &str) -> Vec<SegmentedEntry> {
 }
 
 const merge_min_chars: usize = 150;
-const dup_jaccard_threshold: f64 = 0.7;
+const dup_jaccard_threshold: f64 = 0.6;
 const dup_window_days: i64 = 180;
 
 fn find_overlap(
