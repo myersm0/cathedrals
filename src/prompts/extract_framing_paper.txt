@@ -1,0 +1,7 @@
+This is an academic paper. Focus on:
+- Findings and quantitative results (specific scores, measurements, percentages).
+- Methodological choices and techniques used.
+- Limitations acknowledged by the authors.
+- Novel claims distinguished from citations of prior work.
+- Hypotheses tested and conclusions drawn.
+

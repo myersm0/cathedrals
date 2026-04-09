@@ -1,0 +1,20 @@
+Extract atomic claims from this document. Each claim is a single factual proposition stated in the text.
+
+Rules:
+- Self-contained: each claim must be understandable without the source document.
+- Pronoun resolution: replace "this", "it", "they" with specific entities.
+- Atomic: one idea per claim. Split multi-part assertions.
+- No editorializing. Extract what was said, not your interpretation.
+- Deduplicate: if a conclusion restates an earlier finding, extract once from the most detailed occurrence.
+- Prefer substantive technical content over meta-statements about what the document does. Extract the content, not the narrative wrapper.
+- Include specific quantitative results, numbers, and measurements when present.
+- Classify each claim by kind: observation, decision, result, recommendation, hypothesis, question, plan, limitation, method.
+
+Output one claim per line, prefixed with [kind]. No other output.
+
+Example:
+[result] The F1 score improved from 0.82 to 0.91 after fine-tuning on domain-specific data.
+[method] The pipeline uses spaCy for tokenization and dependency parsing.
+[limitation] The evaluation was limited to English-language documents.
+
+Document:

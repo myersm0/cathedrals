@@ -621,3 +621,79 @@ impl BackendConfig {
 		})
 	}
 }
+
+#[derive(Debug, Deserialize)]
+struct ExtractConfigToml {
+	#[serde(default = "default_extract_model")]
+	model: String,
+	#[serde(default)]
+	framings: std::collections::HashMap<String, String>,
+	rules: Option<String>,
+}
+
+fn default_extract_model() -> String { "qwen2.5:32b".to_string() }
+
+#[derive(Debug, Clone)]
+pub struct ExtractConfig {
+	pub model: String,
+	pub framings: std::collections::HashMap<String, String>,
+	pub rules_path: Option<String>,
+}
+
+impl Default for ExtractConfig {
+	fn default() -> Self {
+		ExtractConfig {
+			model: default_extract_model(),
+			framings: std::collections::HashMap::new(),
+			rules_path: None,
+		}
+	}
+}
+
+impl ExtractConfig {
+	pub fn load(config_dir: &Path) -> Result<Self> {
+		let path = config_dir.join("extract.toml");
+		if !path.exists() {
+			return Ok(ExtractConfig::default());
+		}
+		let text = std::fs::read_to_string(&path)
+			.with_context(|| format!("reading extract config from {}", path.display()))?;
+		let raw: ExtractConfigToml = toml::from_str(&text)
+			.context("parsing extract.toml")?;
+		let framings = raw.framings.into_iter()
+			.map(|(k, v)| (k, expand_tilde(&v)))
+			.collect();
+		Ok(ExtractConfig {
+			model: raw.model,
+			framings,
+			rules_path: raw.rules.map(|p| expand_tilde(&p)),
+		})
+	}
+
+	pub fn get_framing(&self, doctype_name: Option<&str>) -> Option<String> {
+		if let Some(dt) = doctype_name {
+			if let Some(path) = self.framings.get(dt) {
+				if let Ok(text) = std::fs::read_to_string(path) {
+					return Some(text);
+				}
+			}
+		}
+		if let Some(path) = self.framings.get("default") {
+			if let Ok(text) = std::fs::read_to_string(path) {
+				return Some(text);
+			}
+		}
+		None
+	}
+
+	pub fn get_rules(&self) -> String {
+		if let Some(path) = &self.rules_path {
+			if let Ok(text) = std::fs::read_to_string(path) {
+				return text;
+			}
+		}
+		DEFAULT_EXTRACT_RULES.to_string()
+	}
+}
+
+pub const DEFAULT_EXTRACT_RULES: &str = include_str!("prompts/extract_default.txt");

@@ -3,12 +3,14 @@ mod search;
 mod embed;
 mod tags;
 mod derive;
+mod claims;
 
 pub use documents::*;
 pub use search::*;
 pub use embed::*;
 pub use tags::*;
 pub use derive::*;
+pub use claims::*;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -109,6 +111,19 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 
 		CREATE INDEX IF NOT EXISTS derived_content_document_id ON derived_content(document_id);
 		CREATE UNIQUE INDEX IF NOT EXISTS derived_content_doc_type ON derived_content(document_id, content_type);
+
+		CREATE TABLE IF NOT EXISTS claims (
+			id INTEGER PRIMARY KEY,
+			document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+			entry_id INTEGER REFERENCES entries(id) ON DELETE CASCADE,
+			author TEXT,
+			content TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			model TEXT NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS claims_document_id ON claims(document_id);
 		",
 	)?;
 	migrate(connection)?;
@@ -425,5 +440,60 @@ mod tests {
 
 		let by_source = list_documents(&db, SortColumn::Source, SortDirection::Ascending).unwrap();
 		assert_eq!(by_source[0].source_title, "Alpha");
+	}
+
+	#[test]
+	fn claim_insert_and_retrieve() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "Some content about testing");
+		let id = insert_claim(
+			&db, doc_id.0, None, Some("Alice"), "Testing improves code quality.", "observation", "test-model",
+		).unwrap();
+		assert!(id > 0);
+
+		let claims = get_claims_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(claims.len(), 1);
+		assert_eq!(claims[0].content, "Testing improves code quality.");
+		assert_eq!(claims[0].kind, "observation");
+		assert_eq!(claims[0].author.as_deref(), Some("Alice"));
+	}
+
+	#[test]
+	fn claim_delete_by_document() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		insert_claim(&db, doc_id.0, None, None, "Claim one.", "observation", "m").unwrap();
+		insert_claim(&db, doc_id.0, None, None, "Claim two.", "result", "m").unwrap();
+		assert_eq!(claim_count(&db).unwrap(), 2);
+
+		let deleted = delete_claims_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(deleted, 2);
+		assert_eq!(claim_count(&db).unwrap(), 0);
+	}
+
+	#[test]
+	fn claims_cascade_on_document_delete() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		insert_claim(&db, doc_id.0, None, None, "A claim.", "observation", "m").unwrap();
+		assert_eq!(claim_count(&db).unwrap(), 1);
+
+		db.execute("DELETE FROM documents WHERE id = ?1", [doc_id.0]).unwrap();
+		assert_eq!(claim_count(&db).unwrap(), 0);
+	}
+
+	#[test]
+	fn documents_needing_extraction() {
+		let db = setup_db();
+		let doc1 = insert_test_document(&db, "Doc1", "content one");
+		let doc2 = insert_test_document(&db, "Doc2", "content two");
+
+		let needing = get_documents_needing_extraction(&db).unwrap();
+		assert_eq!(needing.len(), 2);
+
+		insert_claim(&db, doc1.0, None, None, "A claim.", "observation", "m").unwrap();
+		let needing = get_documents_needing_extraction(&db).unwrap();
+		assert_eq!(needing.len(), 1);
+		assert_eq!(needing[0], doc2.0);
 	}
 }

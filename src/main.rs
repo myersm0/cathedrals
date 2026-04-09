@@ -5,6 +5,7 @@ use std::sync::Once;
 
 use commonplace::config::{self, BackendConfig, BackendKind};
 use commonplace::derive::{self, DeriveOptions};
+use commonplace::extract::{self, ExtractOptions};
 use commonplace::ingest;
 use commonplace::llm::LlmBackend;
 use commonplace::ollama::OllamaClient;
@@ -125,6 +126,18 @@ enum Command {
 		status: bool,
 
 		#[arg(long, help = "Limit number of documents to derive")]
+		limit: Option<usize>,
+	},
+
+	/// Extract claims from documents
+	Extract {
+		#[arg(long, help = "Re-extract all documents")]
+		force: bool,
+
+		#[arg(long, help = "Show extraction status only")]
+		status: bool,
+
+		#[arg(long, help = "Limit number of documents to extract")]
 		limit: Option<usize>,
 	},
 }
@@ -252,6 +265,7 @@ fn main() -> Result<()> {
 			let entries = storage::entry_count(&connection)?;
 			let chunks = storage::chunk_count(&connection)?;
 			let embeddings = storage::count_chunks_with_embeddings(&connection)?;
+			let claims = storage::claim_count(&connection)?;
 			if json_output {
 				println!("{}", serde_json::to_string_pretty(&serde_json::json!({
 					"database": db_path.display().to_string(),
@@ -260,6 +274,7 @@ fn main() -> Result<()> {
 					"chunks": chunks,
 					"embeddings": embeddings,
 					"embeddings_total": chunks,
+					"claims": claims,
 				}))?);
 			} else {
 				println!("database: {}", db_path.display());
@@ -267,6 +282,7 @@ fn main() -> Result<()> {
 				println!("entries: {}", entries);
 				println!("chunks: {}", chunks);
 				println!("embeddings: {}/{}", embeddings, chunks);
+				println!("claims: {}", claims);
 			}
 		}
 		Some(Command::Dump { filter }) => {
@@ -387,6 +403,33 @@ fn main() -> Result<()> {
 				bad_detailed,
 				bad_brief,
 				limit,
+			})?;
+		}
+		Some(Command::Extract { force, status, limit }) => {
+			let extract_config = config::ExtractConfig::load(&config_dir)?;
+
+			if status {
+				if json_output {
+					let total_docs = storage::document_count(&connection)?;
+					let docs_with = storage::documents_with_claims_count(&connection)?;
+					let total_claims = storage::claim_count(&connection)?;
+					println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+						"total_docs": total_docs,
+						"docs_with_claims": docs_with,
+						"missing": total_docs - docs_with,
+						"total_claims": total_claims,
+					}))?);
+				} else {
+					extract::run_status(&connection)?;
+				}
+				return Ok(());
+			}
+
+			let backend = create_backend(&backend_config)?;
+			extract::run(&connection, backend.as_ref(), &extract_config, &ExtractOptions {
+				force,
+				limit,
+				status: false,
 			})?;
 		}
 		Some(Command::Get { id }) => {

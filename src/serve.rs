@@ -104,12 +104,14 @@ async fn stats_handler(
 	let entries = storage::entry_count(&connection).map_err(|e| err_500(e))?;
 	let chunks = storage::chunk_count(&connection).map_err(|e| err_500(e))?;
 	let embeddings = storage::count_chunks_with_embeddings(&connection).map_err(|e| err_500(e))?;
+	let claims = storage::claim_count(&connection).map_err(|e| err_500(e))?;
 	Ok(Json(serde_json::json!({
 		"documents": documents,
 		"entries": entries,
 		"chunks": chunks,
 		"embeddings": embeddings,
 		"embeddings_total": chunks,
+		"claims": claims,
 	})))
 }
 
@@ -119,6 +121,16 @@ async fn derive_status_handler(
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
 	let status = storage::get_derive_status(&connection).map_err(|e| err_500(e))?;
 	Ok(Json(status))
+}
+
+async fn claims_handler(
+	State(state): State<SharedState>,
+	Path(doc_id): Path<i64>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+	let connection = state.connection.lock().map_err(|e| err_500(e))?;
+	let claims = storage::get_claims_for_document(&connection, doc_id)
+		.map_err(|e| err_500(e))?;
+	Ok(Json(claims))
 }
 
 pub fn run(
@@ -140,6 +152,7 @@ pub fn run(
 		.route("/entries/:doc_id", get(entries_handler))
 		.route("/stats", get(stats_handler))
 		.route("/derive/status", get(derive_status_handler))
+		.route("/claims/:doc_id", get(claims_handler))
 		.with_state(state);
 
 	let runtime = tokio::runtime::Runtime::new()?;
