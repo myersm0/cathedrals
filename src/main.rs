@@ -266,6 +266,7 @@ fn main() -> Result<()> {
 			let chunks = storage::chunk_count(&connection)?;
 			let embeddings = storage::count_chunks_with_embeddings(&connection)?;
 			let claims = storage::claim_count(&connection)?;
+			let claim_embeddings = storage::count_claims_with_embeddings(&connection)?;
 			if json_output {
 				println!("{}", serde_json::to_string_pretty(&serde_json::json!({
 					"database": db_path.display().to_string(),
@@ -275,6 +276,7 @@ fn main() -> Result<()> {
 					"embeddings": embeddings,
 					"embeddings_total": chunks,
 					"claims": claims,
+					"claim_embeddings": claim_embeddings,
 				}))?);
 			} else {
 				println!("database: {}", db_path.display());
@@ -282,7 +284,7 @@ fn main() -> Result<()> {
 				println!("entries: {}", entries);
 				println!("chunks: {}", chunks);
 				println!("embeddings: {}/{}", embeddings, chunks);
-				println!("claims: {}", claims);
+				println!("claims: {} (embeddings: {})", claims, claim_embeddings);
 			}
 		}
 		Some(Command::Dump { filter }) => {
@@ -320,31 +322,56 @@ fn main() -> Result<()> {
 		}
 		Some(Command::Embed { limit }) => {
 			let backend = create_backend(&backend_config)?;
-			let pending = storage::count_chunks_without_embeddings(&connection)?;
-			let existing = storage::count_chunks_with_embeddings(&connection)?;
-			println!("embeddings: {} existing, {} pending", existing, pending);
 
-			if pending == 0 {
-				println!("all chunks have embeddings");
-				return Ok(());
+			let chunk_pending = storage::count_chunks_without_embeddings(&connection)?;
+			let chunk_existing = storage::count_chunks_with_embeddings(&connection)?;
+			println!("chunk embeddings: {} existing, {} pending", chunk_existing, chunk_pending);
+
+			if chunk_pending > 0 {
+				let chunks = storage::get_chunks_without_embeddings(&connection, limit)?;
+				let total = chunks.len();
+				println!("computing embeddings for {} chunks using {}...", total, embed_model);
+
+				for (i, chunk) in chunks.iter().enumerate() {
+					let embedding = backend.embed(&chunk.body, &embed_model)?;
+					if i == 0 {
+						storage::ensure_vec_table(&connection, embedding.len())?;
+					}
+					storage::insert_embedding(&connection, chunk.id, &embedding)?;
+					if (i + 1) % 10 == 0 || i + 1 == total {
+						eprint!("\r  {}/{}", i + 1, total);
+					}
+				}
+				eprintln!();
 			}
 
-			let chunks = storage::get_chunks_without_embeddings(&connection, limit)?;
-			let total = chunks.len();
-			println!("computing embeddings for {} chunks using {}...", total, embed_model);
+			let claim_pending = storage::count_claims_without_embeddings(&connection)?;
+			let claim_existing = storage::count_claims_with_embeddings(&connection)?;
+			println!("claim embeddings: {} existing, {} pending", claim_existing, claim_pending);
 
-			for (i, chunk) in chunks.iter().enumerate() {
-				let embedding = backend.embed(&chunk.body, &embed_model)?;
-				if i == 0 {
-					storage::ensure_vec_table(&connection, embedding.len())?;
+			if claim_pending > 0 {
+				let claims = storage::get_claims_without_embeddings(&connection, limit)?;
+				let total = claims.len();
+				println!("computing embeddings for {} claims using {}...", total, embed_model);
+
+				for (i, claim) in claims.iter().enumerate() {
+					let embedding = backend.embed(&claim.content, &embed_model)?;
+					if i == 0 {
+						storage::ensure_vec_claims_table(&connection, embedding.len())?;
+					}
+					storage::insert_claim_embedding(&connection, claim.id, &embedding)?;
+					if (i + 1) % 10 == 0 || i + 1 == total {
+						eprint!("\r  {}/{}", i + 1, total);
+					}
 				}
-				storage::insert_embedding(&connection, chunk.id, &embedding)?;
-				if (i + 1) % 10 == 0 || i + 1 == total {
-					eprint!("\r  {}/{}", i + 1, total);
-				}
+				eprintln!();
 			}
-			eprintln!();
-			println!("done");
+
+			if chunk_pending == 0 && claim_pending == 0 {
+				println!("all chunks and claims have embeddings");
+			} else {
+				println!("done");
+			}
 		}
 		Some(Command::Similar { query }) => {
 			let query = query.join(" ");

@@ -170,3 +170,130 @@ pub fn find_similar_chunks_filtered(
 	results.truncate(limit);
 	Ok(results)
 }
+
+// --- vec_claims ---
+
+pub fn vec_claims_table_exists(connection: &Connection) -> bool {
+	connection
+		.query_row(
+			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vec_claims'",
+			[],
+			|_| Ok(()),
+		)
+		.is_ok()
+}
+
+pub fn ensure_vec_claims_table(connection: &Connection, dimension: usize) -> Result<()> {
+	if vec_claims_table_exists(connection) {
+		return Ok(());
+	}
+	connection.execute_batch(&format!(
+		"CREATE VIRTUAL TABLE vec_claims USING vec0(
+			claim_id INTEGER PRIMARY KEY,
+			embedding float[{}] distance_metric=cosine
+		)",
+		dimension,
+	))?;
+	Ok(())
+}
+
+#[derive(Debug)]
+pub struct ClaimForEmbedding {
+	pub id: i64,
+	pub content: String,
+}
+
+pub fn get_claims_without_embeddings(connection: &Connection, limit: Option<usize>) -> Result<Vec<ClaimForEmbedding>> {
+	let base = if vec_claims_table_exists(connection) {
+		"SELECT c.id, c.content FROM claims c
+		 WHERE c.id NOT IN (SELECT claim_id FROM vec_claims)"
+	} else {
+		"SELECT c.id, c.content FROM claims c"
+	};
+	let query = match limit {
+		Some(n) => format!("{} LIMIT {}", base, n),
+		None => base.to_string(),
+	};
+	let mut stmt = connection.prepare(&query)?;
+	let claims = stmt
+		.query_map([], |row| {
+			Ok(ClaimForEmbedding {
+				id: row.get(0)?,
+				content: row.get(1)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(claims)
+}
+
+pub fn count_claims_with_embeddings(connection: &Connection) -> Result<i64> {
+	if !vec_claims_table_exists(connection) {
+		return Ok(0);
+	}
+	let count: i64 = connection.query_row(
+		"SELECT COUNT(*) FROM vec_claims", [], |row| row.get(0),
+	)?;
+	Ok(count)
+}
+
+pub fn count_claims_without_embeddings(connection: &Connection) -> Result<i64> {
+	let total = super::claims::claim_count(connection)?;
+	let embedded = count_claims_with_embeddings(connection)?;
+	Ok(total - embedded)
+}
+
+pub fn insert_claim_embedding(connection: &Connection, claim_id: i64, embedding: &[f32]) -> Result<()> {
+	connection.execute(
+		"INSERT OR REPLACE INTO vec_claims (claim_id, embedding) VALUES (?1, ?2)",
+		params![claim_id, embedding.as_bytes()],
+	)?;
+	Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SimilarClaim {
+	pub claim_id: i64,
+	pub document_id: i64,
+	pub source_title: String,
+	pub content: String,
+	pub kind: String,
+	pub author: Option<String>,
+	pub similarity: f32,
+}
+
+pub fn find_similar_claims(
+	connection: &Connection,
+	query_embedding: &[f32],
+	limit: usize,
+) -> Result<Vec<SimilarClaim>> {
+	let mut stmt = connection.prepare(
+		"WITH knn AS (
+			SELECT claim_id, distance
+			FROM vec_claims
+			WHERE embedding MATCH ?1 AND k = ?2
+		)
+		SELECT knn.claim_id, knn.distance, c.content, c.kind, c.author,
+		       c.document_id, d.source_title
+		FROM knn
+		JOIN claims c ON c.id = knn.claim_id
+		JOIN documents d ON d.id = c.document_id
+		ORDER BY knn.distance"
+	)?;
+
+	let results: Vec<SimilarClaim> = stmt
+		.query_map(params![query_embedding.as_bytes(), limit as i64], |row| {
+			let distance: f32 = row.get(1)?;
+			Ok(SimilarClaim {
+				claim_id: row.get(0)?,
+				document_id: row.get(5)?,
+				source_title: row.get(6)?,
+				content: row.get(2)?,
+				kind: row.get(3)?,
+				author: row.get(4)?,
+				similarity: 1.0 - distance,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+
+	Ok(results)
+}

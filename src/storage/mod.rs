@@ -496,4 +496,53 @@ mod tests {
 		assert_eq!(needing.len(), 1);
 		assert_eq!(needing[0], doc2.0);
 	}
+
+	#[test]
+	fn claim_embedding_lifecycle() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		let claim_id = insert_claim(
+			&db, doc_id.0, None, None, "Rust uses a borrow checker for memory safety.", "observation", "m",
+		).unwrap();
+
+		assert!(!vec_claims_table_exists(&db));
+		assert_eq!(count_claims_without_embeddings(&db).unwrap(), 1);
+
+		let dim = 8;
+		ensure_vec_claims_table(&db, dim).unwrap();
+		assert!(vec_claims_table_exists(&db));
+
+		let embedding: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+		insert_claim_embedding(&db, claim_id, &embedding).unwrap();
+
+		assert_eq!(count_claims_with_embeddings(&db).unwrap(), 1);
+		assert_eq!(count_claims_without_embeddings(&db).unwrap(), 0);
+	}
+
+	#[test]
+	fn find_similar_claims_returns_ranked() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		let c1 = insert_claim(
+			&db, doc_id.0, None, None, "Memory safety via borrow checker.", "method", "m",
+		).unwrap();
+		let c2 = insert_claim(
+			&db, doc_id.0, None, None, "Python uses garbage collection.", "observation", "m",
+		).unwrap();
+
+		let dim = 8;
+		ensure_vec_claims_table(&db, dim).unwrap();
+
+		let emb_a: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+		let emb_b: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+		insert_claim_embedding(&db, c1, &emb_a).unwrap();
+		insert_claim_embedding(&db, c2, &emb_b).unwrap();
+
+		let query: Vec<f32> = vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+		let results = find_similar_claims(&db, &query, 2).unwrap();
+		assert_eq!(results.len(), 2);
+		assert_eq!(results[0].claim_id, c1);
+		assert_eq!(results[0].kind, "method");
+		assert!(results[0].similarity > results[1].similarity);
+	}
 }

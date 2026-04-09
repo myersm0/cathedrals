@@ -105,6 +105,7 @@ async fn stats_handler(
 	let chunks = storage::chunk_count(&connection).map_err(|e| err_500(e))?;
 	let embeddings = storage::count_chunks_with_embeddings(&connection).map_err(|e| err_500(e))?;
 	let claims = storage::claim_count(&connection).map_err(|e| err_500(e))?;
+	let claim_embeddings = storage::count_claims_with_embeddings(&connection).map_err(|e| err_500(e))?;
 	Ok(Json(serde_json::json!({
 		"documents": documents,
 		"entries": entries,
@@ -112,6 +113,7 @@ async fn stats_handler(
 		"embeddings": embeddings,
 		"embeddings_total": chunks,
 		"claims": claims,
+		"claim_embeddings": claim_embeddings,
 	})))
 }
 
@@ -133,6 +135,22 @@ async fn claims_handler(
 	Ok(Json(claims))
 }
 
+async fn similar_claims_handler(
+	State(state): State<SharedState>,
+	Query(params): Query<SimilarParams>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+	let limit = params.limit.unwrap_or(10);
+	let query_embedding = state.backend.embed(&params.q, &state.embed_model)
+		.map_err(|e| err_500(e))?;
+	let connection = state.connection.lock().map_err(|e| err_500(e))?;
+	if !storage::vec_claims_table_exists(&connection) {
+		return Err(err_500("no claim embeddings yet - run 'commonplace extract' then 'commonplace embed'"));
+	}
+	let results = storage::find_similar_claims(&connection, &query_embedding, limit)
+		.map_err(|e| err_500(e))?;
+	Ok(Json(results))
+}
+
 pub fn run(
 	connection: rusqlite::Connection,
 	backend: Box<dyn LlmBackend>,
@@ -152,7 +170,8 @@ pub fn run(
 		.route("/entries/:doc_id", get(entries_handler))
 		.route("/stats", get(stats_handler))
 		.route("/derive/status", get(derive_status_handler))
-		.route("/claims/:doc_id", get(claims_handler))
+		.route("/claims/doc/:doc_id", get(claims_handler))
+		.route("/claims/similar", get(similar_claims_handler))
 		.with_state(state);
 
 	let runtime = tokio::runtime::Runtime::new()?;
