@@ -12,24 +12,24 @@ Personal knowledge base for clipped documents with full-text and semantic search
        │              │              │              │           │
        ▼              ▼              ▼              ▼           ▼
 ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
-│  ingest   │  │ storage/  │  │   derive  │  │   tui/    │  │   serve   │
+│  ingest   │  │ storage/  │  │  derive   │  │   tui/    │  │   serve   │
 │(parse +   │  │ (sqlite)  │  │  (LLM)    │  │(ratatui)  │  │  (axum)   │
 │orchestrate)│  └───────────┘  └───────────┘  └───────────┘  └───────────┘
-└───────────┘        │
-       │             │         ┌───────────┐
-       ▼             │         │   util    │
+└───────────┘        │         ┌───────────┐
+       │             │         │  extract  │
+       ▼             │         │  (LLM)    │
 ┌───────────┐        │         └───────────┘
 │ chunking  │◄───────┘
-└───────────┘
-       ▲
-       │
+└───────────┘                  ┌───────────┐
+       ▲                       │   util    │
+       │                       └───────────┘
 ┌───────────┐      ┌───────────┐      ┌───────────┐
 │   llm     │◄─────│  ollama   │      │  openai   │
 │  (trait)  │◄─────│(impl)     │      │  (impl)   │
 └───────────┘      └───────────┘      └───────────┘
 ```
 
-`LlmBackend` is used by ingest, derive, tui, and serve.
+`LlmBackend` is used by ingest, derive, extract, tui, and serve.
 
 ## Data Model
 
@@ -42,7 +42,9 @@ Document (1) ──► Entry (n) ──► Chunk (n)
     │               │
     │               └── author, timestamp, heading
     │
-    └── source_title, doctype, merge_strategy, tags, derived_content, document_minhash
+    ├── source_title, doctype, merge_strategy, tags, derived_content, document_minhash
+    │
+    └── claims (n) ──► vec_claims (1:1, via sqlite-vec)
 ```
 
 ### Key Tables
@@ -71,6 +73,14 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 
 **derived_content**: LLM-generated summaries (brief + detailed) with quality tracking, model provenance, and source hashing for staleness detection.
 
+**claims**: LLM-extracted atomic propositions from documents. Each claim is a self-contained sentence with provenance back to its source document and (optionally) entry. Stores the extraction model and a hash of the prompt text used, enabling incremental re-extraction when the model or prompt changes.
+- `content`: The claim text
+- `author`: Inherited from the entry when a single author is known
+- `model`: Which LLM produced the extraction
+- `prompt_hash`: Hash of the prompt text, for staleness detection
+
+**vec_claims**: sqlite-vec `vec0` virtual table for semantic search over claims. Separate from `vec_chunks` because claims and chunks are different semantic objects with different query purposes and re-embedding lifecycles. Created lazily on first `what-was-said embed` after claims exist.
+
 ## Module Responsibilities
 
 ### main.rs
@@ -78,7 +88,7 @@ CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec e
 
 The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). `BackendConfig` is loaded from `backend.toml` within this directory, with CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) as optional overrides. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
 
-Subcommands: ingest, search, similar, get, dump, stats, embed, derive, serve, browse (default).
+Subcommands: ingest, search, similar, get, dump, stats, embed, derive, extract, serve, browse (default).
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
@@ -111,7 +121,9 @@ Endpoints:
 - `GET /similar?q=...&limit=N` — semantic search (embeds query via backend, then KNN)
 - `GET /get/:id` — full document with entries and chunks
 - `GET /entries/:doc_id` — entries for a document
-- `GET /stats` — document/entry/chunk/embedding counts
+- `GET /claims/doc/:doc_id` — claims extracted from a document
+- `GET /claims/similar?q=...&limit=N` — semantic search over claims via `vec_claims`
+- `GET /stats` — document/entry/chunk/embedding/claim counts
 - `GET /derive/status` — derivation progress
 
 Creates a tokio runtime internally so the rest of the binary stays synchronous.
@@ -124,6 +136,19 @@ Key functions:
 - `run_status()`: Reports derivation progress
 - `derive_detailed()`: Generates detailed summary, returns body + content length
 - `derive_brief()`: Generates brief summary via LLM, or copies detailed directly for short documents (under `short_threshold`)
+
+### extract.rs
+LLM claim extraction. Calls `backend.chat()` with an adaptive prompt that handles all document types. Parallel to `derive.rs` structurally.
+
+Key functions:
+- `run()`: Selects documents needing extraction (missing claims or stale model/prompt), deletes existing claims, re-extracts, stores results
+- `run_status()`: Reports extraction progress (documents with/without claims, total claim count)
+- `extract_document()`: Builds prompt from config (rules + optional source-format framing), calls LLM, parses response, inserts claims
+- `parse_claims()`: Lenient line parser. Strips bullet markers (`- `, `* `), numbered prefixes (`1. `), bracket labels (`[kind]`), and skips blank lines and preamble. Returns clean claim strings.
+- `compute_prompt_hash()`: Hashes the rules text for staleness detection
+- `resolve_author()`: If all entries in a document share a single author, inherits it for claims
+
+Staleness detection: each claim stores the `model` and `prompt_hash` that produced it. `get_documents_needing_extraction(model, prompt_hash)` returns documents whose claims don't match the current config, enabling automatic incremental re-extraction when the model or prompt changes.
 
 ### config.rs
 Loads and parses configuration files from the config directory. Handles doctype detection.
@@ -138,12 +163,13 @@ Key types:
 - `DoctypeMatch`: Result of detection, includes parser/preprocessor/merge_strategy
 - `TagConfig`: Tag hierarchy, default exclusions, color assignments
 - `DeriveConfig`: Model selection, prompt tiers, thresholds
+- `ExtractConfig`: Model selection, source-format framing paths, rules path, prompt hash computation
 - `BackendConfig`: Backend selection, model defaults, OpenAI auth configuration
 - `BackendKind`: Enum (`Ollama`, `OpenAi`)
 - `OpenAiAuth`: Enum (`ApiKey`, `OAuth`)
 - `OpenAiConfig`: Base URL, auth strategy, OAuth token URL and scope
 
-`BackendConfig::load(config_dir)` reads `backend.toml` from the config directory, falling back to defaults (Ollama on localhost) if the file doesn't exist. `DeriveConfig::load(config_dir)` reads `derive.toml` similarly.
+`BackendConfig::load(config_dir)` reads `backend.toml` from the config directory, falling back to defaults (Ollama on localhost) if the file doesn't exist. `DeriveConfig::load(config_dir)` reads `derive.toml` similarly. `ExtractConfig::load(config_dir)` reads `extract.toml` similarly, defaulting to `gemma3:27b` and the compiled-in adaptive prompt.
 
 ### ingest.rs
 Text parsing, segmentation, and ingestion orchestration. All public functions accept `&dyn LlmBackend` plus an explicit `model: &str` parameter.
@@ -171,11 +197,11 @@ run_preprocessor(script_path, file_path) -> SegmentationResult
 ### storage/
 All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search. Split into submodules, all re-exported from `storage/mod.rs`. Sets `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode=WAL` on initialization for referential integrity and concurrent read access.
 
-Key output types (`GroupedSearchResult`, `ChunkHit`, `SimilarChunk`, `DumpDocument`, `DumpEntry`, `DocumentContent`, `EntryContent`, `ChunkContent`, `DeriveStatus`) derive `Serialize` for JSON output.
+Key output types (`GroupedSearchResult`, `ChunkHit`, `SimilarChunk`, `SimilarClaim`, `Claim`, `DumpDocument`, `DumpEntry`, `DocumentContent`, `EntryContent`, `ChunkContent`, `DeriveStatus`) derive `Serialize` for JSON output.
 
 **mod.rs**: Schema initialization (`initialize()`), foreign keys pragma, WAL mode pragma, `migrate()` for schema upgrades, re-exports, tests.
 
-`migrate()` runs on every startup and handles: rebuilding the entries table to add `ON DELETE CASCADE` if missing, adding the `document_minhash` column to documents if missing, and cleaning up any orphaned entries/chunks with an FTS rebuild.
+`migrate()` runs on every startup and handles: rebuilding the entries table to add `ON DELETE CASCADE` if missing, adding the `document_minhash` column to documents if missing, migrating the claims table if it has the old `kind` column or lacks `prompt_hash` (drops and recreates the table; re-extract to repopulate), and cleaning up any orphaned entries/chunks with an FTS rebuild.
 
 **documents.rs**: Document/entry/chunk CRUD, list/get/dump, counts, merge helpers.
 - `insert_document/entry/chunks`: Write path
@@ -188,14 +214,25 @@ Key output types (`GroupedSearchResult`, `ChunkHit`, `SimilarChunk`, `DumpDocume
 - `search()` / `search_filtered()`: FTS5 MATCH with snippet generation
 - Result grouping: chunks grouped by document via `GroupedSearchResult`, deduplicated by snippet similarity
 
-**embed.rs**: sqlite-vec integration.
-- `ensure_vec_table()`: Creates vec0 virtual table with detected embedding dimension
-- `insert_embedding()`: Writes embedding via zerocopy
+**embed.rs**: sqlite-vec integration for both chunks and claims.
+- `ensure_vec_table()`: Creates `vec_chunks` vec0 virtual table with detected embedding dimension
+- `insert_embedding()`: Writes chunk embedding via zerocopy
 - `find_similar_chunks_filtered()`: KNN search via sqlite-vec `MATCH` with cosine distance
+- `ensure_vec_claims_table()`: Creates `vec_claims` vec0 virtual table, separate from `vec_chunks`
+- `insert_claim_embedding()`: Writes claim embedding
+- `find_similar_claims()`: KNN search over claims, joining back to `claims` and `documents` for metadata
+- `get_claims_without_embeddings()`: Claims needing embedding
+- `count_claims_with/without_embeddings()`: Progress tracking
 
 **tags.rs**: Tag add/remove/list/get operations.
 
 **derive.rs**: Derived content CRUD, derive status, source hash computation for staleness detection.
+
+**claims.rs**: Claim CRUD, extraction status, staleness-aware document selection.
+- `insert_claim()`: Write path (document_id, entry_id, author, content, model, prompt_hash)
+- `get_claims_for_document()`: All claims for a document, ordered by id
+- `delete_claims_for_document()`: Bulk delete before re-extraction
+- `get_documents_needing_extraction(model, prompt_hash)`: Returns document ids where no claims match both the current model and prompt hash — handles missing claims, model changes, and prompt changes in a single query
 
 ### util.rs
 Shared string utilities.
@@ -347,6 +384,24 @@ brief = "~/.config/what-was-said/prompts/brief.txt"
 
 Prompt tier is selected by document content length: short (<1200 chars) gets a terse 1-2 sentence prompt, medium (<3500) gets a proportional summary, long gets structured section-by-section analysis. For short documents, the brief summary is copied directly from the detailed output without an additional LLM call.
 
+### extract.toml
+
+```toml
+model = "gemma3:27b"
+
+[framings]
+email = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
+slack = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
+whisper = "~/.config/what-was-said/prompts/extract_framing_voice.txt"
+```
+
+**Fields**:
+- `model`: LLM for claim extraction (default: `gemma3:27b`). Independent of the global `model` in `backend.toml`.
+- `rules`: Optional path to a custom extraction rules prompt. If absent, the compiled-in adaptive prompt is used.
+- `framings`: Optional per-doctype source-format framings. These are structural hints (e.g. "attribute to speaker"), not domain-specific instructions — the adaptive prompt handles domain adaptation. Keyed by doctype name from `config.toml`.
+
+If `extract.toml` doesn't exist, defaults to `gemma3:27b` with the compiled-in prompt and no framings.
+
 ## External Preprocessors
 
 Python scripts that parse format-specific content.
@@ -422,13 +477,15 @@ See `examples/parsers/` for working email and Slack preprocessor scripts, and `e
 
 ## Embeddings
 
-Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance metric. The table is created lazily on the first `what-was-said embed` run, with the embedding dimension detected from the model's response.
+Chunk embeddings are stored in `vec_chunks`, claim embeddings in `vec_claims` — both sqlite-vec `vec0` virtual tables with cosine distance metric. Tables are created lazily on the first `what-was-said embed` run, with the embedding dimension detected from the model's response.
 
 **Generate**: `what-was-said embed [--limit N] [--embed-model MODEL]`
 
+The embed command processes chunks first, then claims, with separate progress reporting for each.
+
 **Default model**: qwen3-embedding:8b via Ollama
 
-**Search**: KNN via sqlite-vec's `WHERE embedding MATCH ? AND k = ?` syntax. Sublinear in collection size.
+**Search**: KNN via sqlite-vec's `WHERE embedding MATCH ? AND k = ?` syntax. Sublinear in collection size. Chunk search and claim search are independent queries against their respective tables.
 
 ## Key Design Decisions
 
@@ -458,7 +515,13 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 13. **Paragraph-aware chunking**: Chunk boundary detection recognizes both sentence-ending punctuation (`.!?`) and paragraph breaks (`\n\n`) as snap points. This prevents documents without terminal punctuation (bullet lists, notes, code-heavy content) from producing oversized single chunks.
 
-14. **Config-directory convention**: All configuration files (`config.toml`, `backend.toml`, `tags.toml`, `derive.toml`, themes) live in a single config directory (default `~/.config/what-was-said/`), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
+14. **Config-directory convention**: All configuration files (`config.toml`, `backend.toml`, `tags.toml`, `derive.toml`, `extract.toml`, themes) live in a single config directory (default `~/.config/what-was-said/`), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
+
+15. **Claim extraction with adaptive prompt**: A single prompt handles all document types. The LLM adapts its extraction to whatever is substantive in the text rather than following per-domain rules. Source-format framings (email attribution, voice memo context) are retained as structural hints only. No stored classification — testing showed models are weak at it, and the claim text itself is the representation.
+
+16. **Incremental re-extraction via model + prompt_hash**: Each claim stores the model and a hash of the prompt rules that produced it. `what-was-said extract` compares against the current config and re-extracts only stale documents. This means changing the configured model or editing the prompt file triggers automatic re-extraction without `--force`.
+
+17. **Separate vec_claims table**: Claims and chunks are different semantic objects — claims are atomic propositions, chunks are text fragments. They have different query purposes (what was said vs. where is it) and different re-embedding lifecycles (re-extract claims without re-chunking). Mixing them in one vector table would couple these concerns.
 
 ## Adding a New CLI Command
 
@@ -479,7 +542,9 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 **Reset database**: Delete `~/.local/share/what-was-said/what-was-said.db`
 
-**Re-embed everything**: `DROP TABLE vec_chunks;` in sqlite3, then `what-was-said embed`
+**Re-embed everything**: `DROP TABLE vec_chunks; DROP TABLE IF EXISTS vec_claims;` in sqlite3, then `what-was-said embed`
+
+**Re-extract all claims**: `what-was-said extract --force` then `what-was-said embed`
 
 **Debug ingestion**: Run with file directly, check stderr output. Near-dup matches and near-misses are logged to stderr.
 

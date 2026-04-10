@@ -42,7 +42,7 @@ Structured segmentation and metadata extraction for non-standard formats (e.g. p
 
 **Local-first** — SQLite + sqlite-vec. No external services required.
 
-**LLM integration** — Summaries, embeddings, and (in progress) structured claim extraction. Works with Ollama locally or any OpenAI-compatible API, including endpoints secured with OAuth2 client credentials.
+**LLM integration** — Summaries, embeddings, and structured claim extraction. Works with Ollama locally or any OpenAI-compatible API, including endpoints secured with OAuth2 client credentials.
 
 **Terminal-native interface** — Fast TUI for browsing, reading, tagging, and searching your collection.
 
@@ -112,10 +112,13 @@ what-was-said get 42
 
 **Enrich**
 ```bash
-what-was-said embed              # compute embeddings
+what-was-said embed              # compute embeddings (chunks + claims)
 what-was-said derive             # generate summaries (missing only)
 what-was-said derive --force     # regenerate all
 what-was-said derive --status    # check progress
+what-was-said extract            # extract claims (missing or stale)
+what-was-said extract --force    # re-extract all
+what-was-said extract --status   # check progress
 ```
 
 **Serve**
@@ -132,6 +135,7 @@ what-was-said get 42 --json
 what-was-said stats --json
 what-was-said dump --json
 what-was-said derive --status --json
+what-was-said extract --status --json
 ```
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
@@ -195,6 +199,8 @@ The source line is matched against doctype patterns in `config.toml` to determin
 | `GET /similar?q=...&limit=N` | Semantic search via embeddings (default limit 10) |
 | `GET /get/:id` | Full document with entries and chunks |
 | `GET /entries/:doc_id` | Entries for a document |
+| `GET /claims/doc/:doc_id` | Claims extracted from a document |
+| `GET /claims/similar?q=...&limit=N` | Semantic search over claims |
 | `GET /stats` | Database statistics |
 | `GET /derive/status` | Derivation progress |
 
@@ -279,6 +285,8 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 **Near-duplicate detection** — Documents are fingerprinted at ingest time using MinHash over 3-word shingles. New documents are compared against existing documents within a ±180-day window. Jaccard similarity above 0.7 tags the older document as `superseded`; near-misses (0.4–0.7) are logged to stderr.
 
+**Claim extraction** — LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, author (when known), the extraction model, and a prompt hash for staleness detection. An adaptive prompt handles all document types; source-format framings (email attribution, voice memo context) can be configured for structural hints. Claims are embedded into a separate `vec_claims` table for semantic search independent of chunks. Running `what-was-said extract` automatically detects documents needing extraction — including those whose claims were produced by a different model or prompt than what's currently configured.
+
 ---
 
 ## Configuration
@@ -289,6 +297,7 @@ All config lives in `~/.config/what-was-said/` (override with `--config`):
 - `backend.toml` — LLM backend selection, model defaults, and authentication
 - `tags.toml` — tag hierarchy, default exclusions, tag colors
 - `derive.toml` — LLM prompt thresholds and model overrides for summary generation
+- `extract.toml` — claim extraction model and prompt overrides
 
 ### backend.toml
 
@@ -359,8 +368,15 @@ rm ~/.local/share/what-was-said/what-was-said.db
 **Rebuild embeddings:**
 ```sql
 DROP TABLE vec_chunks;
+DROP TABLE IF EXISTS vec_claims;
 ```
 ```bash
+what-was-said embed
+```
+
+**Re-extract claims:**
+```bash
+what-was-said extract --force
 what-was-said embed
 ```
 
@@ -368,7 +384,7 @@ what-was-said embed
 
 ## Roadmap
 
-**Claim extraction** *(in design)* — A `claims` table for LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, entry, author (when known), kind (observation, decision, result, recommendation, hypothesis, question, plan, limitation, method), and the model that produced it. Extraction strategy varies by doctype: whole-document for clips and papers, sliding-window over entries for long threads. Claims will be embedded for semantic search alongside chunks, and exposed via the `serve` API.
+**Windowed claim extraction** — Sliding-window extraction over entries for long email/Slack threads (10-15 messages of context, extracting from the middle portion, then advancing). Currently all extraction is whole-document.
 
 **Temporal reasoning** — Structured reasoning over how documents and their claims evolve over time.
 
