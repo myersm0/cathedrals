@@ -381,25 +381,27 @@ fn main() -> Result<()> {
 
 			let backend = create_backend(&backend_config)?;
 			let query_embedding = backend.embed(&query, &embed_model)?;
-			let results = storage::find_similar_chunks(&connection, &query_embedding, 10)?;
+			let results = query::find_similar_grouped(&connection, &query_embedding, 10)?;
 
 			if json_output {
 				println!("{}", serde_json::to_string_pretty(&results)?);
 			} else if results.is_empty() {
 				println!("no results");
 			} else {
-				for result in &results {
+				for doc in &results {
 					println!(
 						"--- [{:.3}] {} | {} ---",
-						result.similarity,
-						result.source_title,
-						util::truncate_str(&result.clip_date, 10),
+						-doc.best_rank,
+						doc.source_title,
+						util::truncate_str(&doc.clip_date, 10),
 					);
-					for line in result.body.lines().take(5) {
-						println!("  {}", line);
-					}
-					if result.body.lines().count() > 5 {
-						println!("  ...");
+					for chunk in &doc.chunks {
+						for line in chunk.chunk_body.lines().take(5) {
+							println!("  {}", line);
+						}
+						if chunk.chunk_body.lines().count() > 5 {
+							println!("  ...");
+						}
 					}
 					println!();
 				}

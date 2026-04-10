@@ -9,7 +9,7 @@ use ratatui::{
 };
 use rusqlite::Connection;
 
-use crate::query::{self, GroupedSearchResult, SearchSortColumn};
+use crate::query::{self, SearchFilters, SearchSortColumn};
 use crate::storage;
 use crate::util::truncate_str;
 use super::{App, Mode, SearchConfig, SearchField, SearchMode};
@@ -93,9 +93,11 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 		return Ok(());
 	}
 
-	let author_filter = if app.author_filter.is_empty() { None } else { Some(app.author_filter.as_str()) };
-	let date_from = if app.date_from.is_empty() { None } else { Some(app.date_from.as_str()) };
-	let date_to = if app.date_to.is_empty() { None } else { Some(app.date_to.as_str()) };
+	let filters = SearchFilters {
+		author: if app.author_filter.is_empty() { None } else { Some(app.author_filter.clone()) },
+		date_from: if app.date_from.is_empty() { None } else { Some(app.date_from.clone()) },
+		date_to: if app.date_to.is_empty() { None } else { Some(app.date_to.clone()) },
+	};
 
 	let allowed_doc_ids: std::collections::HashSet<i64> = app.documents.iter()
 		.filter(|d| app.passes_global_filter(d))
@@ -108,9 +110,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 				connection,
 				&app.search_query,
 				app.search_sort_column,
-				author_filter,
-				date_from,
-				date_to,
+				&filters,
 			)?;
 
 			app.search_results = all_results.into_iter()
@@ -137,9 +137,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 				connection,
 				&query_embedding,
 				50,
-				author_filter,
-				date_from,
-				date_to,
+				&filters,
 			)?;
 
 			app.search_results = all_grouped.into_iter()

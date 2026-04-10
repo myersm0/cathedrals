@@ -32,6 +32,9 @@ fn err_404(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
 struct SearchParams {
 	q: String,
 	sort: Option<String>,
+	author: Option<String>,
+	date_from: Option<String>,
+	date_to: Option<String>,
 }
 
 async fn search_handler(
@@ -42,8 +45,13 @@ async fn search_handler(
 		Some("date") => SearchSortColumn::Date,
 		_ => SearchSortColumn::Score,
 	};
+	let filters = query::SearchFilters {
+		author: params.author,
+		date_from: params.date_from,
+		date_to: params.date_to,
+	};
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
-	let mut results = query::search(&connection, &params.q, sort)
+	let mut results = query::search_filtered(&connection, &params.q, sort, &filters)
 		.map_err(|e| err_500(e))?;
 	query::strip_fts_markers(&mut results);
 	Ok(Json(results))
@@ -53,6 +61,9 @@ async fn search_handler(
 struct SimilarParams {
 	q: String,
 	limit: Option<usize>,
+	author: Option<String>,
+	date_from: Option<String>,
+	date_to: Option<String>,
 }
 
 async fn similar_handler(
@@ -60,14 +71,20 @@ async fn similar_handler(
 	Query(params): Query<SimilarParams>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
 	let limit = params.limit.unwrap_or(10);
+	let filters = query::SearchFilters {
+		author: params.author,
+		date_from: params.date_from,
+		date_to: params.date_to,
+	};
 	let query_embedding = state.backend.embed(&params.q, &state.embed_model)
 		.map_err(|e| err_500(e))?;
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
 	if !storage::vec_table_exists(&connection) {
 		return Err(err_500("no embeddings yet - run 'what-was-said embed' first"));
 	}
-	let results = storage::find_similar_chunks(&connection, &query_embedding, limit)
-		.map_err(|e| err_500(e))?;
+	let results = query::find_similar_grouped_filtered(
+		&connection, &query_embedding, limit, &filters,
+	).map_err(|e| err_500(e))?;
 	Ok(Json(results))
 }
 

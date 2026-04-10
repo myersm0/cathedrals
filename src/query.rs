@@ -32,23 +32,42 @@ pub struct ChunkHit {
 	pub rank: f64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SearchFilters {
+	pub author: Option<String>,
+	pub date_from: Option<String>,
+	pub date_to: Option<String>,
+}
+
+impl SearchFilters {
+	fn author_ref(&self) -> Option<&str> {
+		self.author.as_deref()
+	}
+	fn date_from_ref(&self) -> Option<&str> {
+		self.date_from.as_deref()
+	}
+	fn date_to_ref(&self) -> Option<&str> {
+		self.date_to.as_deref()
+	}
+}
+
 pub fn search(
 	connection: &Connection,
 	query: &str,
 	sort_by: SearchSortColumn,
 ) -> Result<Vec<GroupedSearchResult>> {
-	search_filtered(connection, query, sort_by, None, None, None)
+	search_filtered(connection, query, sort_by, &SearchFilters::default())
 }
 
 pub fn search_filtered(
 	connection: &Connection,
 	query: &str,
 	sort_by: SearchSortColumn,
-	author_like: Option<&str>,
-	date_from: Option<&str>,
-	date_to: Option<&str>,
+	filters: &SearchFilters,
 ) -> Result<Vec<GroupedSearchResult>> {
-	let rows = storage::raw_fts_search(connection, query, author_like, date_from, date_to)?;
+	let rows = storage::raw_fts_search(
+		connection, query, filters.author_ref(), filters.date_from_ref(), filters.date_to_ref(),
+	)?;
 	Ok(group_fts_results(rows, sort_by))
 }
 
@@ -57,20 +76,18 @@ pub fn find_similar_grouped(
 	query_embedding: &[f32],
 	limit: usize,
 ) -> Result<Vec<GroupedSearchResult>> {
-	let chunks = storage::find_similar_chunks(connection, query_embedding, limit)?;
-	Ok(group_similar_results(chunks))
+	find_similar_grouped_filtered(connection, query_embedding, limit, &SearchFilters::default())
 }
 
 pub fn find_similar_grouped_filtered(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
-	author_like: Option<&str>,
-	date_from: Option<&str>,
-	date_to: Option<&str>,
+	filters: &SearchFilters,
 ) -> Result<Vec<GroupedSearchResult>> {
 	let chunks = storage::find_similar_chunks_filtered(
-		connection, query_embedding, limit, author_like, date_from, date_to,
+		connection, query_embedding, limit,
+		filters.author_ref(), filters.date_from_ref(), filters.date_to_ref(),
 	)?;
 	Ok(group_similar_results(chunks))
 }
