@@ -120,8 +120,8 @@ fn derive_detailed(
 		return Ok((existing.map(|d| d.body).unwrap_or_default(), content_len));
 	}
 
-	let prompt = config.get_detailed_prompt(content_len);
-	let full_prompt = format!("{}\n{}", prompt, full_text);
+	let prompt_instructions = config.resolve_detailed_prompt(content_len);
+	let full_prompt = crate::prompts::detailed_summary_prompt(&full_text, &prompt_instructions);
 	let response = backend.chat(&full_prompt, &config.detailed_model)?;
 	let source_hash = storage::compute_document_source_hash(connection, doc_id)?;
 
@@ -166,8 +166,8 @@ fn derive_brief(
 	let response = if content_len < config.short_threshold {
 		detailed_body.to_string()
 	} else {
-		let brief_prompt = config.get_brief_prompt();
-		let full_prompt = format!("{}\n{}", brief_prompt, detailed_body);
+		let brief_instructions = config.resolve_brief_prompt();
+		let full_prompt = crate::prompts::brief_summary_prompt(detailed_body, &brief_instructions);
 		backend.chat(&full_prompt, &config.brief_model)?
 	};
 

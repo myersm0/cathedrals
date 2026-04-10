@@ -1,7 +1,5 @@
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use crate::config::ExtractConfig;
 use crate::llm::LlmBackend;
@@ -91,7 +89,9 @@ fn extract_document(
 	prompt_hash: &str,
 ) -> Result<usize> {
 	let full_text = storage::get_document_full_text(connection, document_id)?;
-	let prompt = build_prompt(config, doctype_name, &full_text);
+	let framing = config.get_framing(doctype_name);
+	let rules = config.get_rules();
+	let prompt = crate::prompts::claim_extraction_prompt(&full_text, &rules, framing.as_deref());
 	let response = backend.chat(&prompt, &config.model)?;
 	let claims = parse_claims(&response);
 
@@ -110,22 +110,6 @@ fn extract_document(
 	}
 
 	Ok(claims.len())
-}
-
-fn build_prompt(config: &ExtractConfig, doctype_name: Option<&str>, document_text: &str) -> String {
-	let framing = config.get_framing(doctype_name);
-	let rules = config.get_rules();
-	match framing {
-		Some(f) => format!("{}{}\n{}", f, rules, document_text),
-		None => format!("{}\n{}", rules, document_text),
-	}
-}
-
-pub fn compute_prompt_hash(config: &ExtractConfig) -> String {
-	let rules = config.get_rules();
-	let mut hasher = DefaultHasher::new();
-	rules.hash(&mut hasher);
-	format!("{:016x}", hasher.finish())
 }
 
 fn strip_line_prefix(line: &str) -> &str {

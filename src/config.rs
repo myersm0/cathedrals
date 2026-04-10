@@ -453,62 +453,36 @@ impl DeriveConfig {
 				return text;
 			}
 		}
-		DEFAULT_DETAILED_PROMPT.to_string()
+		crate::prompts::default_detailed_prompt(crate::prompts::LengthTier::Medium).to_string()
 	}
 
-	pub fn get_detailed_prompt(&self, content_len: usize) -> &'static str {
-		if content_len < self.short_threshold {
-			DETAILED_PROMPT_SHORT
-		} else if content_len < self.medium_threshold {
-			DETAILED_PROMPT_MEDIUM
-		} else {
-			DETAILED_PROMPT_LONG
+	pub fn resolve_detailed_prompt(&self, content_len: usize) -> String {
+		let tier = crate::prompts::LengthTier::from_len(
+			content_len, self.short_threshold, self.medium_threshold,
+		);
+		if let Some(path) = self.prompts.get(tier.key()) {
+			if let Ok(text) = std::fs::read_to_string(path) {
+				return text;
+			}
 		}
+		if let Some(path) = self.prompts.get("default") {
+			if let Ok(text) = std::fs::read_to_string(path) {
+				return text;
+			}
+		}
+		crate::prompts::default_detailed_prompt(tier).to_string()
 	}
 
-	pub fn get_brief_prompt(&self) -> String {
+	pub fn resolve_brief_prompt(&self) -> String {
 		if let Some(path) = self.prompts.get("brief") {
 			if let Ok(text) = std::fs::read_to_string(path) {
 				return text;
 			}
 		}
-		DEFAULT_BRIEF_PROMPT.to_string()
+		crate::prompts::default_brief_prompt().to_string()
 	}
 }
 
-pub const DETAILED_PROMPT_SHORT: &str = r#"Summarize briefly. 1-2 sentences max. No filler.
-
-Document:
-"#;
-
-pub const DETAILED_PROMPT_MEDIUM: &str = r#"Summarize this document. Cover the main points directly.
-Be proportional — a few sentences to a paragraph.
-No hedging, no meta-commentary.
-
-Document:
-"#;
-
-pub const DETAILED_PROMPT_LONG: &str = r#"Summarize this document by section:
-1. What is the main topic/claim?
-2. What evidence or points are made in the body?
-3. What conclusions or outcomes are reached?
-
-Be thorough but not verbose. No filler.
-
-Document:
-"#;
-
-pub const DEFAULT_DETAILED_PROMPT: &str = DETAILED_PROMPT_MEDIUM;
-
-pub const DEFAULT_BRIEF_PROMPT: &str = r#"Compress to 1-2 sentences. Output ONLY the summary, then stop.
-Never include:
-- "---" or separators
-- Explanations of your summary
-- "Feel free to ask" or similar
-- Who/what/why breakdowns
-
-Summary to compress:
-"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -690,12 +664,10 @@ impl ExtractConfig {
 				return text;
 			}
 		}
-		DEFAULT_EXTRACT_RULES.to_string()
+		crate::prompts::default_extract_rules().to_string()
 	}
 
 	pub fn prompt_hash(&self) -> String {
-		crate::extract::compute_prompt_hash(self)
+		crate::prompts::compute_prompt_hash(&self.get_rules())
 	}
 }
-
-pub const DEFAULT_EXTRACT_RULES: &str = include_str!("prompts/extract_default.txt");
