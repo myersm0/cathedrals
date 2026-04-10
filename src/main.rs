@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
@@ -71,18 +71,16 @@ enum Command {
 		force: bool,
 	},
 
-	/// Keyword search chunks
-	Search {
+	/// Search the collection
+	About {
 		query: Vec<String>,
+
+		#[arg(long, value_enum, default_value = "semantic", help = "Search method")]
+		method: SearchMethod,
 	},
 
-	/// Semantic search using embeddings
-	Similar {
-		query: Vec<String>,
-	},
-
-	/// Get document by id
-	Get {
+	/// Show document by id
+	In {
 		id: i64,
 	},
 
@@ -141,6 +139,12 @@ enum Command {
 		#[arg(long, help = "Limit number of documents to extract")]
 		limit: Option<usize>,
 	},
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SearchMethod {
+	Exact,
+	Semantic,
 }
 
 fn default_db_path() -> PathBuf {
@@ -223,35 +227,73 @@ fn main() -> Result<()> {
 				eprintln!("ingested {} files", ingested);
 			}
 		}
-		Some(Command::Search { query }) => {
+		Some(Command::About { query, method }) => {
 			let query = query.join(" ");
 			if query.is_empty() {
-				anyhow::bail!("search requires a query");
+				anyhow::bail!("about requires a query");
 			}
-			let results = query::search(&connection, &query, SearchSortColumn::Score)?;
-			if json_output {
-				let mut results = results;
-				query::strip_fts_markers(&mut results);
-				println!("{}", serde_json::to_string_pretty(&results)?);
-			} else if results.is_empty() {
-				println!("no results");
-			} else {
-				for doc in &results {
-					println!("=== [{}] {} ===", doc.source_title, doc.clip_date);
-					for chunk in &doc.chunks {
-						if let Some(heading) = &chunk.heading_title {
-							print!("  ## {} ", heading);
-						} else {
-							print!("  ");
+
+			match method {
+				SearchMethod::Exact => {
+					let results = query::search(&connection, &query, SearchSortColumn::Score)?;
+					if json_output {
+						let mut results = results;
+						query::strip_fts_markers(&mut results);
+						println!("{}", serde_json::to_string_pretty(&results)?);
+					} else if results.is_empty() {
+						println!("no results");
+					} else {
+						for doc in &results {
+							println!("=== [{}] {} ===", doc.source_title, doc.clip_date);
+							for chunk in &doc.chunks {
+								if let Some(heading) = &chunk.heading_title {
+									print!("  ## {} ", heading);
+								} else {
+									print!("  ");
+								}
+								if let Some(author) = &chunk.author {
+									print!("[{}] ", author);
+								}
+								println!();
+								for line in chunk.chunk_body.lines() {
+									println!("    {}", line);
+								}
+								println!();
+							}
 						}
-						if let Some(author) = &chunk.author {
-							print!("[{}] ", author);
+					}
+				}
+				SearchMethod::Semantic => {
+					if !storage::vec_table_exists(&connection) {
+						anyhow::bail!("no embeddings yet - run 'what-was-said embed' first");
+					}
+
+					let backend = create_backend(&backend_config)?;
+					let query_embedding = backend.embed(&query, &embed_model)?;
+					let results = query::find_similar_grouped(&connection, &query_embedding, 10)?;
+
+					if json_output {
+						println!("{}", serde_json::to_string_pretty(&results)?);
+					} else if results.is_empty() {
+						println!("no results");
+					} else {
+						for doc in &results {
+							println!(
+								"--- [{:.3}] {} | {} ---",
+								-doc.best_rank,
+								doc.source_title,
+								util::truncate_str(&doc.clip_date, 10),
+							);
+							for chunk in &doc.chunks {
+								for line in chunk.chunk_body.lines().take(5) {
+									println!("  {}", line);
+								}
+								if chunk.chunk_body.lines().count() > 5 {
+									println!("  ...");
+								}
+							}
+							println!();
 						}
-						println!();
-						for line in chunk.chunk_body.lines() {
-							println!("    {}", line);
-						}
-						println!();
 					}
 				}
 			}
@@ -369,44 +411,6 @@ fn main() -> Result<()> {
 				println!("done");
 			}
 		}
-		Some(Command::Similar { query }) => {
-			let query = query.join(" ");
-			if query.is_empty() {
-				anyhow::bail!("similar requires a query");
-			}
-
-			if !storage::vec_table_exists(&connection) {
-				anyhow::bail!("no embeddings yet - run 'what-was-said embed' first");
-			}
-
-			let backend = create_backend(&backend_config)?;
-			let query_embedding = backend.embed(&query, &embed_model)?;
-			let results = query::find_similar_grouped(&connection, &query_embedding, 10)?;
-
-			if json_output {
-				println!("{}", serde_json::to_string_pretty(&results)?);
-			} else if results.is_empty() {
-				println!("no results");
-			} else {
-				for doc in &results {
-					println!(
-						"--- [{:.3}] {} | {} ---",
-						-doc.best_rank,
-						doc.source_title,
-						util::truncate_str(&doc.clip_date, 10),
-					);
-					for chunk in &doc.chunks {
-						for line in chunk.chunk_body.lines().take(5) {
-							println!("  {}", line);
-						}
-						if chunk.chunk_body.lines().count() > 5 {
-							println!("  ...");
-						}
-					}
-					println!();
-				}
-			}
-		}
 		Some(Command::Derive { missing, stale, bad_detailed, bad_brief, force, status, limit }) => {
 			let derive_config = config::DeriveConfig::load(&config_dir)?;
 
@@ -457,7 +461,7 @@ fn main() -> Result<()> {
 				status: false,
 			})?;
 		}
-		Some(Command::Get { id }) => {
+		Some(Command::In { id }) => {
 			let doc = storage::get_document(&connection, id)?
 				.context(format!("no document with id {}", id))?;
 			if json_output {
