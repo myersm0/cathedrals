@@ -213,9 +213,8 @@ fn main() -> Result<()> {
 
 	match cli.command {
 		Some(Command::Ingest { directory, force }) => {
-			let backend = create_backend(&backend_config)?;
 			let (ingested, skipped) = ingest::ingest_directory(
-				&connection, backend.as_ref(), &model, &directory, &config, force,
+				&connection, &directory, &config, force,
 			)?;
 			if skipped > 0 {
 				eprintln!("ingested {} files, skipped {} (already in db)", ingested, skipped);

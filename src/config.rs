@@ -8,7 +8,6 @@ use crate::types::MergeStrategy;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Parser {
-	Ollama,
 	Markdown,
 	Whisper,
 	Whole,
@@ -74,7 +73,6 @@ pub struct DoctypeMatch {
 
 fn parse_parser(value: &str) -> Result<Parser> {
 	match value {
-		"ollama" => Ok(Parser::Ollama),
 		"markdown" => Ok(Parser::Markdown),
 		"whisper" => Ok(Parser::Whisper),
 		"whole" => Ok(Parser::Whole),
