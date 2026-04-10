@@ -631,7 +631,7 @@ struct ExtractConfigToml {
 	rules: Option<String>,
 }
 
-fn default_extract_model() -> String { "qwen2.5:32b".to_string() }
+fn default_extract_model() -> String { "gemma3:27b".to_string() }
 
 #[derive(Debug, Clone)]
 pub struct ExtractConfig {
@@ -693,6 +693,10 @@ impl ExtractConfig {
 			}
 		}
 		DEFAULT_EXTRACT_RULES.to_string()
+	}
+
+	pub fn prompt_hash(&self) -> String {
+		crate::extract::compute_prompt_hash(self)
 	}
 }
 

@@ -256,7 +256,6 @@ pub struct SimilarClaim {
 	pub document_id: i64,
 	pub source_title: String,
 	pub content: String,
-	pub kind: String,
 	pub author: Option<String>,
 	pub similarity: f32,
 }
@@ -272,7 +271,7 @@ pub fn find_similar_claims(
 			FROM vec_claims
 			WHERE embedding MATCH ?1 AND k = ?2
 		)
-		SELECT knn.claim_id, knn.distance, c.content, c.kind, c.author,
+		SELECT knn.claim_id, knn.distance, c.content, c.author,
 		       c.document_id, d.source_title
 		FROM knn
 		JOIN claims c ON c.id = knn.claim_id
@@ -285,11 +284,10 @@ pub fn find_similar_claims(
 			let distance: f32 = row.get(1)?;
 			Ok(SimilarClaim {
 				claim_id: row.get(0)?,
-				document_id: row.get(5)?,
-				source_title: row.get(6)?,
+				document_id: row.get(4)?,
+				source_title: row.get(5)?,
 				content: row.get(2)?,
-				kind: row.get(3)?,
-				author: row.get(4)?,
+				author: row.get(3)?,
 				similarity: 1.0 - distance,
 			})
 		})?

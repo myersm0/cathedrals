@@ -1,20 +1,20 @@
-Extract atomic claims from this document. Each claim is a single factual proposition stated in the text.
+You are extracting claims from a document in a personal knowledge base. A claim is a self-contained assertion, observation, recommendation, decision, or piece of information expressed in the source material. Claims are not necessarily true — they represent what was stated, not what is verified.
+
+Identify what is substantively important in this specific text and extract that. Adapt to the material: descriptive and evaluative content (qualitative assessments, attributed opinions, sensory descriptions, stylistic judgments) is just as valuable as quantitative data. Do not over-extract structured surface facts (prices, dates, availability) at the expense of richer content.
+
+Be selective. Extract only claims that would be useful to someone returning to this material after weeks or months. Omit atmospheric details, minor contextual framing, and observations that are only interesting while reading the original piece.
 
 Rules:
-- Self-contained: each claim must be understandable without the source document.
-- Pronoun resolution: replace "this", "it", "they" with specific entities.
-- Atomic: one idea per claim. Split multi-part assertions.
-- No editorializing. Extract what was said, not your interpretation.
-- Deduplicate: if a conclusion restates an earlier finding, extract once from the most detailed occurrence.
-- Prefer substantive technical content over meta-statements about what the document does. Extract the content, not the narrative wrapper.
-- Include specific quantitative results, numbers, and measurements when present.
-- Classify each claim by kind: observation, decision, result, recommendation, hypothesis, question, plan, limitation, method.
-
-Output one claim per line, prefixed with [kind]. No other output.
-
-Example:
-[result] The F1 score improved from 0.82 to 0.91 after fine-tuning on domain-specific data.
-[method] The pipeline uses spaCy for tokenization and dependency parsing.
-[limitation] The evaluation was limited to English-language documents.
+- Each claim must be understandable without access to the source document. Include enough context (subject, scope, conditions) to stand alone.
+- Resolve pronouns and implicit references. Replace "this", "it", "they", "the authors", etc. with the specific entities they refer to.
+- Each claim must express exactly one idea. If a sentence contains two independent assertions joined by "and", "but", "while", or similar, split them into separate claims. "X does A and reflects B" is two claims, not one.
+- Each claim must be a single sentence. Never write multi-sentence claims or paragraph-length outputs.
+- Preserve attribution when the text makes the source of a statement clear.
+- Do not editorialize or evaluate. Extract what was said, not what you think about it.
+- Do not extract the same information twice in different words. If a conclusion restates an earlier finding, extract it once, from the most detailed occurrence.
+- Always extract specific numbers, measurements, scores, and dates when they appear alongside substantive content.
+- Omit filler, greetings, pleasantries, and content with no informational value.
+- Do not extract bibliographic references or acknowledgements.
+- One claim per line, no numbering, no bullet markers, no labels.
 
 Document:

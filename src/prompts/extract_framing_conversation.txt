@@ -1,6 +1,2 @@
-This is a conversation thread (email or chat). Focus on:
-- Decisions made and action items assigned.
-- Information shared between participants.
-- Questions raised and positions stated.
-- Attribute claims to their speaker when authorship is indicated.
+This is a conversation thread (email or chat messages). Each message has an author. Attribute claims to their speaker when authorship is indicated.
 

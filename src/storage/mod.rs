@@ -118,9 +118,9 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			entry_id INTEGER REFERENCES entries(id) ON DELETE CASCADE,
 			author TEXT,
 			content TEXT NOT NULL,
-			kind TEXT NOT NULL,
 			created_at TEXT NOT NULL,
-			model TEXT NOT NULL
+			model TEXT NOT NULL,
+			prompt_hash TEXT NOT NULL
 		);
 
 		CREATE INDEX IF NOT EXISTS claims_document_id ON claims(document_id);
@@ -189,6 +189,35 @@ fn migrate(connection: &Connection) -> Result<()> {
 			[],
 		)?;
 		connection.execute_batch("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild');")?;
+	}
+	let claims_exists: bool = connection
+		.query_row(
+			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'claims'",
+			[], |_| Ok(()),
+		)
+		.is_ok();
+	if claims_exists {
+		let claims_sql: String = connection.query_row(
+			"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'claims'",
+			[], |row| row.get(0),
+		)?;
+		if claims_sql.contains("kind") || !claims_sql.contains("prompt_hash") {
+			eprintln!("migrating claims table (dropping old schema, re-extract to repopulate)");
+			connection.execute_batch("DROP TABLE claims;")?;
+			connection.execute_batch(
+				"CREATE TABLE claims (
+					id INTEGER PRIMARY KEY,
+					document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+					entry_id INTEGER REFERENCES entries(id) ON DELETE CASCADE,
+					author TEXT,
+					content TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					model TEXT NOT NULL,
+					prompt_hash TEXT NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS claims_document_id ON claims(document_id);",
+			)?;
+		}
 	}
 	Ok(())
 }
@@ -447,23 +476,23 @@ mod tests {
 		let db = setup_db();
 		let doc_id = insert_test_document(&db, "Doc", "Some content about testing");
 		let id = insert_claim(
-			&db, doc_id.0, None, Some("Alice"), "Testing improves code quality.", "observation", "test-model",
+			&db, doc_id.0, None, Some("Alice"), "Testing improves code quality.", "test-model", "abc123",
 		).unwrap();
 		assert!(id > 0);
 
 		let claims = get_claims_for_document(&db, doc_id.0).unwrap();
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].content, "Testing improves code quality.");
-		assert_eq!(claims[0].kind, "observation");
 		assert_eq!(claims[0].author.as_deref(), Some("Alice"));
+		assert_eq!(claims[0].prompt_hash, "abc123");
 	}
 
 	#[test]
 	fn claim_delete_by_document() {
 		let db = setup_db();
 		let doc_id = insert_test_document(&db, "Doc", "content");
-		insert_claim(&db, doc_id.0, None, None, "Claim one.", "observation", "m").unwrap();
-		insert_claim(&db, doc_id.0, None, None, "Claim two.", "result", "m").unwrap();
+		insert_claim(&db, doc_id.0, None, None, "Claim one.", "m", "h").unwrap();
+		insert_claim(&db, doc_id.0, None, None, "Claim two.", "m", "h").unwrap();
 		assert_eq!(claim_count(&db).unwrap(), 2);
 
 		let deleted = delete_claims_for_document(&db, doc_id.0).unwrap();
@@ -475,7 +504,7 @@ mod tests {
 	fn claims_cascade_on_document_delete() {
 		let db = setup_db();
 		let doc_id = insert_test_document(&db, "Doc", "content");
-		insert_claim(&db, doc_id.0, None, None, "A claim.", "observation", "m").unwrap();
+		insert_claim(&db, doc_id.0, None, None, "A claim.", "m", "h").unwrap();
 		assert_eq!(claim_count(&db).unwrap(), 1);
 
 		db.execute("DELETE FROM documents WHERE id = ?1", [doc_id.0]).unwrap();
@@ -483,18 +512,26 @@ mod tests {
 	}
 
 	#[test]
-	fn documents_needing_extraction() {
+	fn documents_needing_extraction_checks_staleness() {
 		let db = setup_db();
 		let doc1 = insert_test_document(&db, "Doc1", "content one");
 		let doc2 = insert_test_document(&db, "Doc2", "content two");
 
-		let needing = get_documents_needing_extraction(&db).unwrap();
+		let needing = get_documents_needing_extraction(&db, "model-a", "hash-1").unwrap();
 		assert_eq!(needing.len(), 2);
 
-		insert_claim(&db, doc1.0, None, None, "A claim.", "observation", "m").unwrap();
-		let needing = get_documents_needing_extraction(&db).unwrap();
+		insert_claim(&db, doc1.0, None, None, "A claim.", "model-a", "hash-1").unwrap();
+		let needing = get_documents_needing_extraction(&db, "model-a", "hash-1").unwrap();
 		assert_eq!(needing.len(), 1);
 		assert_eq!(needing[0], doc2.0);
+
+		// changing model makes doc1 stale again
+		let needing = get_documents_needing_extraction(&db, "model-b", "hash-1").unwrap();
+		assert_eq!(needing.len(), 2);
+
+		// changing prompt_hash makes doc1 stale again
+		let needing = get_documents_needing_extraction(&db, "model-a", "hash-2").unwrap();
+		assert_eq!(needing.len(), 2);
 	}
 
 	#[test]
@@ -502,7 +539,7 @@ mod tests {
 		let db = setup_db();
 		let doc_id = insert_test_document(&db, "Doc", "content");
 		let claim_id = insert_claim(
-			&db, doc_id.0, None, None, "Rust uses a borrow checker for memory safety.", "observation", "m",
+			&db, doc_id.0, None, None, "Rust uses a borrow checker for memory safety.", "m", "h",
 		).unwrap();
 
 		assert!(!vec_claims_table_exists(&db));
@@ -524,10 +561,10 @@ mod tests {
 		let db = setup_db();
 		let doc_id = insert_test_document(&db, "Doc", "content");
 		let c1 = insert_claim(
-			&db, doc_id.0, None, None, "Memory safety via borrow checker.", "method", "m",
+			&db, doc_id.0, None, None, "Memory safety via borrow checker.", "m", "h",
 		).unwrap();
 		let c2 = insert_claim(
-			&db, doc_id.0, None, None, "Python uses garbage collection.", "observation", "m",
+			&db, doc_id.0, None, None, "Python uses garbage collection.", "m", "h",
 		).unwrap();
 
 		let dim = 8;
@@ -542,7 +579,6 @@ mod tests {
 		let results = find_similar_claims(&db, &query, 2).unwrap();
 		assert_eq!(results.len(), 2);
 		assert_eq!(results[0].claim_id, c1);
-		assert_eq!(results[0].kind, "method");
 		assert!(results[0].similarity > results[1].similarity);
 	}
 }

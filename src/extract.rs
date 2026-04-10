@@ -1,5 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crate::config::ExtractConfig;
 use crate::llm::LlmBackend;
@@ -30,12 +32,14 @@ pub fn run(
 	config: &ExtractConfig,
 	options: &ExtractOptions,
 ) -> Result<()> {
+	let prompt_hash = config.prompt_hash();
+
 	let doc_ids: Vec<i64> = if options.force {
 		let mut stmt = connection.prepare("SELECT id FROM documents")?;
 		let ids = stmt.query_map([], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
 		ids
 	} else {
-		storage::get_documents_needing_extraction(connection)?
+		storage::get_documents_needing_extraction(connection, &config.model, &prompt_hash)?
 	};
 
 	if doc_ids.is_empty() {
@@ -66,12 +70,10 @@ pub fn run(
 			util::truncate_str(&source_title, 40),
 		);
 
-		if options.force {
-			storage::delete_claims_for_document(connection, *doc_id)?;
-		}
+		storage::delete_claims_for_document(connection, *doc_id)?;
 
 		let count = extract_document(
-			connection, backend, config, *doc_id, doctype_name.as_deref(),
+			connection, backend, config, *doc_id, doctype_name.as_deref(), &prompt_hash,
 		)?;
 		total_claims += count;
 	}
@@ -86,6 +88,7 @@ fn extract_document(
 	config: &ExtractConfig,
 	document_id: i64,
 	doctype_name: Option<&str>,
+	prompt_hash: &str,
 ) -> Result<usize> {
 	let full_text = storage::get_document_full_text(connection, document_id)?;
 	let prompt = build_prompt(config, doctype_name, &full_text);
@@ -94,15 +97,15 @@ fn extract_document(
 
 	let author = resolve_author(connection, document_id);
 
-	for (kind, content) in &claims {
+	for content in &claims {
 		storage::insert_claim(
 			connection,
 			document_id,
 			None,
 			author.as_deref(),
 			content,
-			kind,
 			&config.model,
+			prompt_hash,
 		)?;
 	}
 
@@ -118,39 +121,62 @@ fn build_prompt(config: &ExtractConfig, doctype_name: Option<&str>, document_tex
 	}
 }
 
-fn parse_claims(response: &str) -> Vec<(String, String)> {
+pub fn compute_prompt_hash(config: &ExtractConfig) -> String {
+	let rules = config.get_rules();
+	let mut hasher = DefaultHasher::new();
+	rules.hash(&mut hasher);
+	format!("{:016x}", hasher.finish())
+}
+
+fn strip_line_prefix(line: &str) -> &str {
+	let s = line.trim();
+	if s.starts_with("- ") {
+		return s[2..].trim();
+	}
+	if s.starts_with("* ") {
+		return s[2..].trim();
+	}
+	if let Some(rest) = s.strip_prefix('[') {
+		if let Some(bracket_end) = rest.find(']') {
+			let after = rest[bracket_end + 1..].trim();
+			if !after.is_empty() {
+				return after;
+			}
+		}
+	}
+	if let Some(dot_pos) = s.find(". ") {
+		let prefix = &s[..dot_pos];
+		if prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
+			return s[dot_pos + 2..].trim();
+		}
+	}
+	s
+}
+
+fn parse_claims(response: &str) -> Vec<String> {
 	let mut claims = Vec::new();
 	for line in response.lines() {
-		let trimmed = line.trim();
-		if trimmed.is_empty() {
+		let stripped = strip_line_prefix(line);
+		if stripped.is_empty() {
 			continue;
 		}
-		if let Some(parsed) = parse_claim_line(trimmed) {
-			claims.push(parsed);
+		if looks_like_preamble(stripped) {
+			continue;
 		}
+		claims.push(stripped.to_string());
 	}
 	claims
 }
 
-fn parse_claim_line(line: &str) -> Option<(String, String)> {
-	if !line.starts_with('[') {
-		return None;
-	}
-	let bracket_end = line.find(']')?;
-	let kind = line[1..bracket_end].trim().to_lowercase();
-	let content = line[bracket_end + 1..].trim().to_string();
-	if content.is_empty() {
-		return None;
-	}
-	let valid_kinds = [
-		"observation", "decision", "result", "recommendation",
-		"hypothesis", "question", "plan", "limitation", "method",
-	];
-	if valid_kinds.contains(&kind.as_str()) {
-		Some((kind, content))
-	} else {
-		Some(("observation".to_string(), content))
-	}
+fn looks_like_preamble(line: &str) -> bool {
+	let lower = line.to_lowercase();
+	lower.starts_with("here are")
+		|| lower.starts_with("the following")
+		|| lower.starts_with("below are")
+		|| lower.starts_with("claims:")
+		|| lower.starts_with("claims extracted")
+		|| lower.starts_with("note:")
+		|| lower.starts_with("---")
 }
 
 fn resolve_author(connection: &Connection, document_id: i64) -> Option<String> {
@@ -174,42 +200,53 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn parse_claim_line_basic() {
-		let (kind, content) = parse_claim_line("[result] The F1 score was 0.91.").unwrap();
-		assert_eq!(kind, "result");
-		assert_eq!(content, "The F1 score was 0.91.");
+	fn strip_plain_line() {
+		assert_eq!(strip_line_prefix("A simple claim."), "A simple claim.");
 	}
 
 	#[test]
-	fn parse_claim_line_unknown_kind_falls_back() {
-		let (kind, content) = parse_claim_line("[finding] Some claim text.").unwrap();
-		assert_eq!(kind, "observation");
-		assert_eq!(content, "Some claim text.");
+	fn strip_bullet_dash() {
+		assert_eq!(strip_line_prefix("- A claim with dash."), "A claim with dash.");
 	}
 
 	#[test]
-	fn parse_claim_line_empty_content_rejected() {
-		assert!(parse_claim_line("[result]").is_none());
-		assert!(parse_claim_line("[result]  ").is_none());
+	fn strip_bullet_star() {
+		assert_eq!(strip_line_prefix("* A claim with star."), "A claim with star.");
 	}
 
 	#[test]
-	fn parse_claim_line_no_bracket_rejected() {
-		assert!(parse_claim_line("Just a regular line.").is_none());
+	fn strip_numbered() {
+		assert_eq!(strip_line_prefix("1. First claim."), "First claim.");
+		assert_eq!(strip_line_prefix("12. Twelfth claim."), "Twelfth claim.");
 	}
 
 	#[test]
-	fn parse_claims_filters_junk() {
+	fn strip_bracket_label() {
+		assert_eq!(
+			strip_line_prefix("[observation] The F1 score was 0.91."),
+			"The F1 score was 0.91.",
+		);
+	}
+
+	#[test]
+	fn strip_preserves_content_only_bracket() {
+		assert_eq!(strip_line_prefix("[standalone]"), "[standalone]");
+	}
+
+	#[test]
+	fn parse_claims_filters_preamble_and_blanks() {
 		let response = "\
-[observation] Claim one.
-Some preamble the model shouldn't have emitted.
-[method] Claim two.
+Here are the claims extracted from the document:
 
-[result] Claim three.";
+The system uses SQLite for storage.
+- Claims are extracted per document.
+1. Embeddings enable semantic search.
+
+Note: some claims may overlap.";
 		let claims = parse_claims(response);
 		assert_eq!(claims.len(), 3);
-		assert_eq!(claims[0].0, "observation");
-		assert_eq!(claims[1].0, "method");
-		assert_eq!(claims[2].0, "result");
+		assert_eq!(claims[0], "The system uses SQLite for storage.");
+		assert_eq!(claims[1], "Claims are extracted per document.");
+		assert_eq!(claims[2], "Embeddings enable semantic search.");
 	}
 }
