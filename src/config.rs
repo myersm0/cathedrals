@@ -32,7 +32,11 @@ struct DoctypeToml {
 	preprocessor: Option<String>,
 	#[serde(default)]
 	skip: bool,
+	#[serde(default = "default_true")]
+	extract: bool,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone)]
 pub struct Doctype {
@@ -46,6 +50,7 @@ pub struct Doctype {
 	pub merge_consecutive_same_author: bool,
 	pub preprocessor: Option<String>,
 	pub skip: bool,
+	pub extract: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +141,7 @@ impl Config {
 				merge_consecutive_same_author: entry.merge_consecutive_same_author,
 				preprocessor: entry.preprocessor.map(|p| expand_tilde(&p)),
 				skip: entry.skip,
+				extract: entry.extract,
 			});
 		}
 		Ok(Config { doctypes })
@@ -226,6 +232,13 @@ impl Config {
 		}
 
 		None
+	}
+
+	pub fn no_extract_doctypes(&self) -> std::collections::HashSet<String> {
+		self.doctypes.iter()
+			.filter(|d| !d.extract)
+			.map(|d| d.name.clone())
+			.collect()
 	}
 }
 

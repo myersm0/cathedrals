@@ -455,11 +455,12 @@ fn main() -> Result<()> {
 			}
 
 			let backend = create_backend(&backend_config)?;
+			let skip_doctypes = config.no_extract_doctypes();
 			extract::run(&connection, backend.as_ref(), &extract_config, &ExtractOptions {
 				force,
 				limit,
 				status: false,
-			})?;
+			}, &skip_doctypes)?;
 		}
 		Some(Command::In { id }) => {
 			let doc = storage::get_document(&connection, id)?

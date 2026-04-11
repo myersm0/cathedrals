@@ -29,6 +29,7 @@ pub fn run(
 	backend: &dyn LlmBackend,
 	config: &ExtractConfig,
 	options: &ExtractOptions,
+	skip_doctypes: &std::collections::HashSet<String>,
 ) -> Result<()> {
 	let prompt_hash = config.prompt_hash();
 
@@ -54,12 +55,20 @@ pub fn run(
 	println!("  model: {}", config.model);
 
 	let mut total_claims = 0usize;
+	let mut skipped = 0usize;
 	for (i, doc_id) in doc_ids.iter().enumerate() {
 		let (source_title, doctype_name): (String, Option<String>) = connection.query_row(
 			"SELECT source_title, doctype_name FROM documents WHERE id = ?1",
 			[doc_id],
 			|row| Ok((row.get(0)?, row.get(1)?)),
 		)?;
+
+		if let Some(ref dt) = doctype_name {
+			if skip_doctypes.contains(dt) {
+				skipped += 1;
+				continue;
+			}
+		}
 
 		eprint!(
 			"\r  [{}/{}] {}...",
@@ -76,7 +85,11 @@ pub fn run(
 		total_claims += count;
 	}
 	eprintln!();
-	println!("done — {} claims extracted", total_claims);
+	if skipped > 0 {
+		println!("done — {} claims extracted, {} documents skipped (no-extract doctype)", total_claims, skipped);
+	} else {
+		println!("done — {} claims extracted", total_claims);
+	}
 	Ok(())
 }
 
